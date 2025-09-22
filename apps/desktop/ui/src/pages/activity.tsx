@@ -1,7 +1,6 @@
 import * as React from "react"
 import { useNavigate } from "react-router-dom"
 
-import { DirectoryPanel } from "@/components/folders/DirectoryPanel"
 import type { DirectoryEntry } from "@/types/folders"
 import { useFolderStore } from "@/store/folder-store"
 
@@ -9,12 +8,16 @@ export function Activity() {
   const navigate = useNavigate()
   const selectedFolderId = useFolderStore((state) => state.selectedFolderId)
   const folders = useFolderStore((state) => state.folders)
-  const entries = useFolderStore((state) => state.entries)
-  const isLoadingEntries = useFolderStore((state) => state.isLoadingEntries)
-  const entryError = useFolderStore((state) => state.entryError)
-  const loadDir = useFolderStore((state) => state.loadDir)
+  const candidates = useFolderStore((state) => state.candidates)
+  const selectedCandidateIds = useFolderStore((state) => state.selectedCandidateIds)
+  const loadCandidates = useFolderStore((state) => state.loadCandidates)
   const openInSystem = useFolderStore((state) => state.openInSystem)
   const selectFolder = useFolderStore((state) => state.selectFolder)
+  const toggleCandidate = useFolderStore((state) => state.toggleCandidate)
+  const selectAllCandidates = useFolderStore((state) => state.selectAllCandidates)
+  const clearSelection = useFolderStore((state) => state.clearSelection)
+  const archiveSelected = useFolderStore((state) => state.archiveSelected)
+  const deleteSelected = useFolderStore((state) => state.deleteSelected)
 
   const selectedFolder = React.useMemo(() => {
     return folders.find((folder) => folder.id === selectedFolderId)
@@ -27,29 +30,13 @@ export function Activity() {
     }
 
     if (selectedFolderId) {
-      void loadDir(selectedFolderId)
+      void loadCandidates()
     }
-  }, [folders, loadDir, selectFolder, selectedFolderId])
+  }, [folders, loadCandidates, selectFolder, selectedFolderId])
 
-  const handleRetryEntries = React.useCallback(() => {
-    if (selectedFolderId) {
-      void loadDir(selectedFolderId)
-    }
-  }, [loadDir, selectedFolderId])
-
-  const handleOpenEntry = React.useCallback(
-    (entry: DirectoryEntry) => {
-      void openInSystem(entry.path, entry.kind !== "dir")
-    },
-    [openInSystem]
-  )
-
-  const handleRevealEntry = React.useCallback(
-    (entry: DirectoryEntry) => {
-      void openInSystem(entry.path, true)
-    },
-    [openInSystem]
-  )
+  const handleOpenPath = React.useCallback((path: string, reveal = false) => {
+    void openInSystem(path, reveal)
+  }, [openInSystem])
 
   if (!selectedFolder) {
     return (
@@ -78,17 +65,85 @@ export function Activity() {
         <p className="truncate text-sm text-muted-foreground">{selectedFolder.path}</p>
       </header>
 
-      <DirectoryPanel
-        entries={entries}
-        loading={isLoadingEntries}
-        error={entryError}
-        folderName={selectedFolder.name}
-        onRetry={handleRetryEntries}
-        onOpenEntry={handleOpenEntry}
-        onRevealEntry={handleRevealEntry}
-      />
+      <section className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={selectAllCandidates} className="rounded bg-secondary px-2 py-1 text-xs">Select all</button>
+            <button type="button" onClick={clearSelection} className="rounded bg-secondary px-2 py-1 text-xs">Clear</button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => void archiveSelected()} className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground">Archive selected</button>
+            <button type="button" onClick={() => void deleteSelected(true)} className="rounded bg-destructive px-3 py-1 text-xs text-destructive-foreground">Delete to trash</button>
+          </div>
+        </div>
+        <div className="text-xs text-muted-foreground">{selectedCandidateIds.length} selected</div>
+      </section>
+
+      <section className="space-y-4">
+        {renderBucket("duplicates", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("big_download", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("old_desktop", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("screenshot", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("executable", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("other", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+      </section>
     </div>
   )
 }
 
 export default Activity
+
+type CandidateRow = {
+  fileId: number
+  path: string
+  parentDir: string
+  sizeBytes: number
+  reason: string
+}
+
+function renderBucket(
+  bucketKey: string,
+  items: CandidateRow[],
+  toggle: (id: number) => void,
+  selectedIds: number[],
+  openPath: (path: string, reveal?: boolean) => void
+) {
+  const bucketItems = items.filter((c) => c.reason === bucketKey)
+  if (!bucketItems.length) return null
+
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-medium capitalize">{bucketKey.replace("_", " ")}</h3>
+      <ul className="divide-y divide-border rounded-md border">
+        {bucketItems.map((c) => {
+          const checked = selectedIds.includes(c.fileId)
+          return (
+            <li key={c.fileId} className="flex items-center gap-3 px-3 py-2">
+              <input type="checkbox" checked={checked} onChange={() => toggle(c.fileId)} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm text-foreground">{c.path.split("/").pop() ?? c.path}</div>
+                <div className="truncate text-xs text-muted-foreground">{c.parentDir}</div>
+              </div>
+              <div className="text-xs tabular-nums text-muted-foreground">{formatSize(c.sizeBytes)}</div>
+              <div className="flex gap-2">
+                <button className="rounded bg-secondary px-2 py-1 text-xs" onClick={() => openPath(c.path, false)}>Open</button>
+                <button className="rounded bg-secondary px-2 py-1 text-xs" onClick={() => openPath(c.path, true)}>Reveal</button>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+function formatSize(bytes: number) {
+  const units = ["B","KB","MB","GB","TB"]
+  let i = 0
+  let n = bytes
+  while (n >= 1024 && i < units.length - 1) {
+    n = n / 1024
+    i++
+  }
+  return `${n.toFixed(1)} ${units[i]}`
+}

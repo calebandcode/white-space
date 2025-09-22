@@ -1,0 +1,9 @@
+{
+  "identifier": "event-listen",
+  "description": "Allow listening to Tauri core events",
+  "permissions": [
+    "core:event:default",
+    "core:event:allow-listen"
+  ]
+}
+

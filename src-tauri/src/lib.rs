@@ -55,6 +55,7 @@ pub fn run() {
             commands::scan_status,
             commands::get_candidates,
             commands::daily_candidates,
+            commands::get_candidates_bucketed,
             commands::gauge_state,
             commands::archive_files,
             commands::delete_files,

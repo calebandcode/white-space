@@ -10,6 +10,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::State;
+use walkdir::WalkDir;
 
 // Command result types
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,6 +58,46 @@ pub struct DirectoryEntry {
     pub kind: String,
     pub size: u64,
     pub modified: i64,
+}
+
+// Bucketed candidates API types
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BucketSummary {
+    pub key: String,
+    pub count: usize,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UiCandidate {
+    pub id: i64,
+    pub path: String,
+    pub parent: String,
+    pub size: u64,
+    pub mime: Option<String>,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub accessed_at: Option<String>,
+    pub partial_sha1: Option<String>,
+    pub sha1: Option<String>,
+    pub reason: String,
+    pub group_key: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CandidatesResponse {
+    pub by_bucket: std::collections::HashMap<String, Vec<UiCandidate>>,
+    pub summaries: Vec<BucketSummary>,
+    pub total_count: usize,
+    pub paging: Paging,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Paging {
+    pub limit: usize,
+    pub offset: usize,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -725,6 +766,182 @@ pub async fn get_candidates(
     db: State<'_, DbPool>,
 ) -> Result<Vec<Candidate>, String> {
     daily_candidates(max_total, db).await
+}
+
+fn normalize_bucket_key(reason: &str) -> String {
+    let lower = reason.to_lowercase();
+    match lower.as_str() {
+        "screenshots" => "screenshot".to_string(),
+        "big downloads" => "big_download".to_string(),
+        "old desktop" => "old_desktop".to_string(),
+        "duplicates" => "duplicate".to_string(),
+        other => other.replace(' ', "_"),
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GetCandidatesBucketedParams {
+    pub root_paths: Option<Vec<String>>, // currently unused, defaults to watched roots
+    pub buckets: Option<Vec<String>>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub sort: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_candidates_bucketed(
+    params: Option<GetCandidatesBucketedParams>,
+    db: State<'_, DbPool>,
+) -> Result<CandidatesResponse, String> {
+    let params = params.unwrap_or(GetCandidatesBucketedParams {
+        root_paths: None,
+        buckets: None,
+        limit: Some(100),
+        offset: Some(0),
+        sort: Some("size_desc".to_string()),
+    });
+
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let offset = params.offset.unwrap_or(0);
+    if limit == 0 { return Err("ERR_VALIDATION: limit must be > 0".to_string()); }
+
+    let db_clone = db.inner().clone();
+    let (mut candidates, errors) = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let selector = FileSelector::new();
+        let db_instance = Database::new(conn);
+        let mut items = selector
+            .daily_candidates(limit + offset, &db_instance)
+            .map_err(|e| format!("ERR_SELECTOR: {}", e))?;
+        Ok::<(Vec<Candidate>, Vec<String>), String>((items.drain(..).collect(), Vec::new()))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    // Filter by requested buckets if provided
+    if let Some(filter) = params.buckets.as_ref() {
+        let set: std::collections::HashSet<String> = filter.iter().map(|s| s.to_lowercase()).collect();
+        candidates.retain(|c| set.contains(&normalize_bucket_key(&c.reason)));
+    }
+
+    // Sort
+    match params.sort.as_deref() {
+        Some("size_desc") => candidates.sort_by(|a,b| b.size_bytes.cmp(&a.size_bytes)),
+        Some("age_desc") => candidates.sort_by(|a,b| b.age_days.partial_cmp(&a.age_days).unwrap_or(std::cmp::Ordering::Equal)),
+        Some("name_asc") => candidates.sort_by(|a,b| a.path.to_lowercase().cmp(&b.path.to_lowercase())),
+        _ => {}
+    }
+
+    let mut total_count = candidates.len();
+    let slice_end = (offset + limit).min(total_count);
+    let paged = if offset < total_count { candidates[offset..slice_end].to_vec() } else { Vec::new() };
+    let has_more = slice_end < total_count;
+
+    let mut by_bucket: std::collections::HashMap<String, Vec<UiCandidate>> = std::collections::HashMap::new();
+    let mut summaries_acc: std::collections::HashMap<String, (usize, u64)> = std::collections::HashMap::new();
+
+    for c in paged {
+        let key = normalize_bucket_key(&c.reason);
+        let entry = UiCandidate {
+            id: c.file_id,
+            path: c.path.clone(),
+            parent: c.parent_dir.clone(),
+            size: c.size_bytes,
+            mime: None,
+            created_at: None,
+            modified_at: None,
+            accessed_at: None,
+            partial_sha1: None,
+            sha1: None,
+            reason: key.clone(),
+            group_key: None,
+        };
+        by_bucket.entry(key.clone()).or_default().push(entry);
+        let e = summaries_acc.entry(key).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += c.size_bytes;
+    }
+
+    // Fallback: if we have no candidates yet (e.g., first run, scan not completed),
+    // surface a shallow pass of obvious executables and old desktop/download items
+    if total_count == 0 {
+        let db_clone = db.inner().clone();
+        let roots = tokio::task::spawn_blocking(move || {
+            let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+            let db_instance = Database::new(conn);
+            db_instance
+                .list_watched_paths()
+                .map_err(|e| format!("ERR_DATABASE: {}", e))
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??;
+
+        let now = std::time::SystemTime::now();
+        let thirty_days = std::time::Duration::from_secs(30 * 24 * 3600);
+
+        for root in roots {
+            let walker = WalkDir::new(&root).max_depth(2).into_iter();
+            for entry in walker.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path.is_file() { continue; }
+                let path_str = path.to_string_lossy().to_string();
+                let name_lower = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| root.clone());
+                let meta = match std::fs::metadata(path) { Ok(m) => m, Err(_) => continue };
+                let size = meta.len();
+                let modified = meta.modified().ok();
+                let is_old = modified.and_then(|m| now.duration_since(m).ok()).map(|d| d >= thirty_days).unwrap_or(false);
+
+                let parent_lower = parent.to_lowercase();
+                let in_downloads = parent_lower.contains("downloads");
+                let in_desktop = parent_lower.contains("desktop");
+
+                let mut bucket: Option<&str> = None;
+                if name_lower.ends_with(".exe") {
+                    if in_downloads || is_old { bucket = Some("executable"); }
+                } else if in_downloads && is_old {
+                    bucket = Some("big_download");
+                } else if in_desktop && is_old {
+                    bucket = Some("old_desktop");
+                }
+
+                if let Some(key) = bucket {
+                    let entry = UiCandidate {
+                        id: 0,
+                        path: path_str.clone(),
+                        parent: parent.clone(),
+                        size,
+                        mime: None,
+                        created_at: None,
+                        modified_at: None,
+                        accessed_at: None,
+                        partial_sha1: None,
+                        sha1: None,
+                        reason: key.to_string(),
+                        group_key: None,
+                    };
+                    by_bucket.entry(key.to_string()).or_default().push(entry);
+                    let e = summaries_acc.entry(key.to_string()).or_insert((0, 0));
+                    e.0 += 1;
+                    e.1 += size;
+                    total_count += 1;
+                }
+            }
+        }
+    }
+
+    let summaries = summaries_acc
+        .into_iter()
+        .map(|(k, (count, bytes))| BucketSummary { key: k, count, total_bytes: bytes })
+        .collect::<Vec<_>>();
+
+    Ok(CandidatesResponse {
+        by_bucket,
+        summaries,
+        total_count,
+        paging: Paging { limit, offset, has_more: has_more },
+        errors,
+    })
 }
 
 #[tauri::command]

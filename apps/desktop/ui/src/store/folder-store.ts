@@ -159,17 +159,28 @@ function mapDirectoryEntry(entry: BackendDirectoryEntry): DirectoryEntry {
 }
 
 function mapCandidate(candidate: BackendCandidate): ScanCandidate {
+  const reason = normalizeReason(candidate.reason)
   return {
     fileId: candidate.file_id,
     path: candidate.path,
     parentDir: candidate.parent_dir,
     sizeBytes: candidate.size_bytes,
-    reason: candidate.reason,
+    reason,
     score: candidate.score,
     confidence: candidate.confidence,
     previewHint: candidate.preview_hint,
     ageDays: candidate.age_days,
   }
+}
+
+function normalizeReason(value: string): string {
+  const lower = value.toLowerCase()
+  if (lower === "screenshots") return "screenshot"
+  if (lower === "big downloads") return "big_download"
+  if (lower === "old desktop") return "old_desktop"
+  if (lower === "duplicates" || lower === "duplicate") return "duplicates"
+  if (lower === "executables" || lower === ".exe" || lower === "exe") return "executable"
+  return lower.replace(/\s+/g, "_")
 }
 
 interface FolderStoreState {
@@ -401,7 +412,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async loadCandidates() {
     try {
-      const items = await invokeCommand<BackendCandidate[]>("get_candidates", { max_total: 32 })
+      const items = await invokeCommand<BackendCandidate[]>("get_candidates", { maxTotal: 32 })
       set({ candidates: items.map(mapCandidate), selectedCandidateIds: [] })
     } catch (error) {
       console.error("Failed to load candidates", error)
