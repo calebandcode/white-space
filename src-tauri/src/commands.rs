@@ -60,6 +60,14 @@ pub struct DirectoryEntry {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct UndoBatchSummary {
+    pub batch_id: String,
+    pub action_type: String,
+    pub file_count: usize,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PlatformInfo {
     pub os: String,
     pub open_label: String,
@@ -926,6 +934,55 @@ pub async fn undo_last(db: State<'_, DbPool>) -> Result<UndoResult, String> {
         let mut undo_manager = UndoManager::new();
         undo_manager
             .undo_last(&db_instance)
+            .map_err(|e| format!("ERR_UNDO: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn list_undoable_batches(db: State<'_, DbPool>) -> Result<Vec<UndoBatchSummary>, String> {
+    let db_clone = db.inner().clone();
+    let batches = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let undo = UndoManager::new();
+        undo
+            .get_undoable_batches(&db_instance)
+            .map_err(|e| format!("ERR_UNDO: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    let summaries = batches
+        .into_iter()
+        .map(|b| UndoBatchSummary {
+            batch_id: b.batch_id,
+            action_type: b.action_type.to_string(),
+            file_count: b.file_count,
+            created_at: b.created_at.timestamp(),
+        })
+        .collect();
+
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn undo_batch(batch_id: String, db: State<'_, DbPool>) -> Result<UndoResult, String> {
+    if batch_id.trim().is_empty() {
+        return Err("ERR_VALIDATION: batch_id cannot be empty".to_string());
+    }
+
+    let db_clone = db.inner().clone();
+    let target = batch_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let mut undo_manager = UndoManager::new();
+        undo_manager
+            .undo_batch(&target, &db_instance)
             .map_err(|e| format!("ERR_UNDO: {}", e))
     })
     .await

@@ -59,6 +59,8 @@ pub fn run() {
             commands::archive_files,
             commands::delete_files,
             commands::undo_last,
+            commands::list_undoable_batches,
+            commands::undo_batch,
             commands::get_review_items,
             commands::get_thumbnail,
             commands::get_prefs,

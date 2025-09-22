@@ -72,6 +72,22 @@ type BackendCandidate = {
   age_days: number
 }
 
+type BackendUndoBatchSummary = {
+  batch_id: string
+  action_type: string
+  file_count: number
+  created_at: number
+}
+
+type BackendUndoResult = {
+  batch_id: string
+  actions_reversed: number
+  files_restored: number
+  duration_ms: number
+  errors: string[]
+  rollback_performed: boolean
+}
+
 type PlatformInfo = {
   os: string
   openLabel: string
@@ -161,6 +177,7 @@ interface FolderStoreState {
   folders: WatchedFolder[]
   entries: DirectoryEntry[]
   candidates: ScanCandidate[]
+  selectedCandidateIds: number[]
   selectedFolderId: string | null
   isLoadingFolders: boolean
   isLoadingEntries: boolean
@@ -178,6 +195,14 @@ interface FolderStoreState {
   startScan: (paths?: string[]) => Promise<void>
   refreshScanStatus: () => Promise<void>
   loadCandidates: () => Promise<void>
+  toggleCandidate: (fileId: number) => void
+  clearSelection: () => void
+  selectAllCandidates: () => void
+  archiveSelected: () => Promise<void>
+  deleteSelected: (toTrash?: boolean) => Promise<void>
+  undoLast: () => Promise<void>
+  listUndoableBatches: () => Promise<BackendUndoBatchSummary[]>
+  undoBatch: (batchId: string) => Promise<BackendUndoResult>
   handleScanProgress: (payload: ScanProgressPayload) => void
   handleScanDone: (payload: ScanFinishedPayload) => Promise<void>
   handleScanError: (payload: ScanErrorPayload) => void
@@ -188,6 +213,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   folders: [],
   entries: [],
   candidates: [],
+  selectedCandidateIds: [],
   selectedFolderId: null,
   isLoadingFolders: false,
   isLoadingEntries: false,
@@ -376,9 +402,110 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   async loadCandidates() {
     try {
       const items = await invokeCommand<BackendCandidate[]>("get_candidates", { max_total: 32 })
-      set({ candidates: items.map(mapCandidate) })
+      set({ candidates: items.map(mapCandidate), selectedCandidateIds: [] })
     } catch (error) {
       console.error("Failed to load candidates", error)
+    }
+  },
+
+  toggleCandidate(fileId) {
+    set((state) => {
+      const exists = state.selectedCandidateIds.includes(fileId)
+      return {
+        selectedCandidateIds: exists
+          ? state.selectedCandidateIds.filter((id) => id !== fileId)
+          : [...state.selectedCandidateIds, fileId],
+      }
+    })
+  },
+
+  clearSelection() {
+    set({ selectedCandidateIds: [] })
+  },
+
+  selectAllCandidates() {
+    set((state) => ({ selectedCandidateIds: state.candidates.map((c) => c.fileId) }))
+  },
+
+  async archiveSelected() {
+    const ids = get().selectedCandidateIds
+    if (!ids.length) return
+    try {
+      await invokeCommand("archive_files", { fileIds: ids })
+      set({ selectedCandidateIds: [] })
+      await get().loadGauge()
+      await get().loadCandidates()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to archive files", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+    }
+  },
+
+  async deleteSelected(toTrash = true) {
+    const ids = get().selectedCandidateIds
+    if (!ids.length) return
+    try {
+      await invokeCommand("delete_files", { fileIds: ids, toTrash })
+      set({ selectedCandidateIds: [] })
+      await get().loadGauge()
+      await get().loadCandidates()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to delete files", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+    }
+  },
+
+  async undoLast() {
+    try {
+      await invokeCommand<BackendUndoResult>("undo_last")
+      await get().loadGauge()
+      await get().loadCandidates()
+    } catch (error) {
+      console.error("Failed to undo last batch", error)
+    }
+  },
+
+  async listUndoableBatches() {
+    try {
+      const result = await invokeCommand<BackendUndoBatchSummary[]>("list_undoable_batches")
+      return result
+    } catch (error) {
+      console.error("Failed to list undoable batches", error)
+      return []
+    }
+  },
+
+  async undoBatch(batchId) {
+    try {
+      const result = await invokeCommand<BackendUndoResult>("undo_batch", { batchId })
+      await get().loadGauge()
+      await get().loadCandidates()
+      return result
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to undo batch", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+      throw error
     }
   },
 

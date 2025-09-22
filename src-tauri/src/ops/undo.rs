@@ -116,6 +116,60 @@ impl UndoManager {
         })
     }
 
+    pub fn undo_batch(&mut self, target_batch_id: &str, db: &Database) -> OpsResult<UndoResult> {
+        // Fetch the batch by id and then reuse the same reverse logic as undo_last
+        let start_time = std::time::SystemTime::now();
+
+        let batch_info = self.get_batch_by_id(target_batch_id, db)?;
+
+        if !self.supported_actions.contains(&batch_info.action_type) {
+            return Err(OpsError::UndoError(format!(
+                "Cannot undo action type: {:?}",
+                batch_info.action_type
+            )));
+        }
+
+        let mut actions_reversed = 0;
+        let mut files_restored = 0;
+        let mut errors = Vec::new();
+        let mut rollback_performed = false;
+
+        for action in &batch_info.actions {
+            match self.reverse_action(action, db) {
+                Ok(_) => {
+                    actions_reversed += 1;
+                    files_restored += 1;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Failed to reverse action {}: {}",
+                        action.id.unwrap_or(0),
+                        e
+                    ));
+
+                    if !rollback_performed {
+                        self.rollback_batch(&batch_info, db)?;
+                        rollback_performed = true;
+                    }
+                }
+            }
+        }
+
+        let duration = start_time
+            .elapsed()
+            .unwrap_or(std::time::Duration::from_secs(0));
+        let duration_ms = duration.as_millis() as u64;
+
+        Ok(UndoResult {
+            batch_id: batch_info.batch_id.clone(),
+            actions_reversed,
+            files_restored,
+            duration_ms,
+            errors,
+            rollback_performed,
+        })
+    }
+
     fn reverse_action(&self, action: &Action, db: &Database) -> OpsResult<()> {
         match action.action {
             ActionType::Archive => self.restore_from_archive(action),
@@ -281,7 +335,7 @@ impl UndoManager {
         Ok(true)
     }
 
-    fn get_batch_by_id(&self, batch_id: &str, db: &Database) -> OpsResult<BatchInfo> {
+    pub fn get_batch_by_id(&self, batch_id: &str, db: &Database) -> OpsResult<BatchInfo> {
         let actions = db.get_actions_by_batch_id(batch_id)
             .map_err(|e| OpsError::UndoError(format!("Failed to get batch actions: {}", e)))?;
         
