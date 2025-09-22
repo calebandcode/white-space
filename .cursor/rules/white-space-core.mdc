@@ -1,0 +1,27 @@
+You are helping me build “White Space” — a local-first desktop app for gentle digital decluttering.
+
+PRINCIPLES
+
+- Local-first, no uploads, no tracking.
+- Archive-first safety (delete only after a 7-day cooling-off).
+- Calm, progressive disclosure (summary → buckets → details).
+- 3-stage gauge: Potential → Staged → Freed (single segmented arc).
+- Rolling 7-day window for metrics (optional weekly reset day).
+- Strong safety rails: skip dev repos, path keywords, recent sibling activity, user deny/allow lists.
+
+STACK
+
+- Tauri 2 (Rust core) + React 18 + TypeScript + Vite
+- Tailwind + shadcn/ui + framer-motion
+- Zustand + React Query
+- SQLite (rusqlite, WAL) with refinery migrations
+- Lemon Squeezy Licensing (client License API: activate/validate/deactivate)
+
+GENERAL RULES
+
+- Prefer smallest, safest path; clear errors; one-click Undo.
+- Tauri 2 security via Capabilities (no v1 allowlist).
+- Long operations: progress reporting + cancel/rollback.
+- Tests first where risky; strict types; no Node-only libs at runtime.
+
+When implementing, create files with full paths, add imports, and include minimal tests.

@@ -1,0 +1,15 @@
+{
+  "identifier": "fs",
+  "description": "File system operations with least privilege access",
+  "permissions": [
+    "fs:default",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-read-dir",
+    "fs:allow-mkdir",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-copy-file",
+    "fs:allow-exists"
+  ]
+}

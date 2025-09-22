@@ -1,0 +1,17 @@
+{
+  "name": "white-space",
+  "version": "0.1.0",
+  "description": "A Tauri 2 + React/Vite + TypeScript application",
+  "private": true,
+  "scripts": {
+    "dev": "cd apps/desktop/ui && npm run dev",
+    "build": "cd apps/desktop/ui && npm run build",
+    "tauri": "cd apps/desktop/ui && npm run tauri",
+    "tauri:dev": "cd apps/desktop/ui && npm run tauri:dev",
+    "tauri:build": "cd apps/desktop/ui && npm run tauri:build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.4"
+  }
+}
+

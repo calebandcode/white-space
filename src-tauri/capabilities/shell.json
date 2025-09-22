@@ -1,0 +1,8 @@
+{
+  "identifier": "shell-open",
+  "description": "Shell permissions for launching safe commands",
+  "permissions": [
+    "shell:default",
+    "shell:allow-open"
+  ]
+}

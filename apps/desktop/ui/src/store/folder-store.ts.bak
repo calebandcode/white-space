@@ -1,0 +1,406 @@
+import { create } from "zustand"
+
+import type { DirectoryEntry, ScanCandidate, WatchedFolder } from "@/types/folders"
+
+type BackendWatchedFolder = {
+  id: number
+  name: string
+  path: string
+  is_accessible: boolean
+}
+
+type BackendDirectoryEntry = {
+  name: string
+  path: string
+  kind: string
+  size: number
+  modified: number
+}
+
+type BackendPlatformInfo = {
+  os: string
+  open_label: string
+}
+
+type ScanProgressPayload = {
+  scanned: number
+  skipped: number
+  errors: number
+  path_sample?: string | null
+}
+
+type ScanFinishedPayload = {
+  scanned: number
+  skipped: number
+  errors: number
+  error_messages: string[]
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+type ScanErrorPayload = {
+  message: string
+}
+
+type ScanStatusPayload = {
+  state: string
+  scanned: number
+  skipped: number
+  errors: number
+  started_at?: string | null
+  finished_at?: string | null
+  roots: number
+  current_path?: string | null
+  last_error?: string | null
+}
+
+type BackendCandidate = {
+  file_id: number
+  path: string
+  parent_dir: string
+  size_bytes: number
+  reason: string
+  score: number
+  confidence: number
+  preview_hint: string
+  age_days: number
+}
+
+type PlatformInfo = {
+  os: string
+  openLabel: string
+}
+
+export type ScanInfo = {
+  status: "idle" | "running"
+  scanned: number
+  skipped: number
+  errors: number
+  startedAt?: string | null
+  finishedAt?: string | null
+  currentPath?: string | null
+  errorMessages: string[]
+  lastError?: string | null
+}
+
+const initialScanInfo: ScanInfo = {
+  status: "idle",
+  scanned: 0,
+  skipped: 0,
+  errors: 0,
+  startedAt: null,
+  finishedAt: null,
+  currentPath: null,
+  errorMessages: [],
+  lastError: null,
+}
+
+async function openDirectoryDialog() {
+  const { dialog } = await import("@tauri-apps/api")
+  return dialog.open({ directory: true, multiple: false })
+}
+
+async function invokeCommand<T = unknown>(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api")
+  return invoke<T>(command, args)
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error
+  if (error instanceof Error) return error.message
+  if (error && typeof error === "object" && "message" in error) {
+    const value = (error as { message?: unknown }).message
+    if (typeof value === "string") return value
+  }
+  return "An unexpected error occurred"
+}
+
+function mapWatchedFolder(folder: BackendWatchedFolder): WatchedFolder {
+  return {
+    id: String(folder.id),
+    name: folder.name,
+    path: folder.path,
+    isAccessible: folder.is_accessible,
+  }
+}
+
+function mapDirectoryEntry(entry: BackendDirectoryEntry): DirectoryEntry {
+  return {
+    name: entry.name,
+    path: entry.path,
+    kind: entry.kind === "dir" ? "dir" : "file",
+    size: entry.size,
+    modified: entry.modified,
+  }
+}
+
+function mapCandidate(candidate: BackendCandidate): ScanCandidate {
+  return {
+    fileId: candidate.file_id,
+    path: candidate.path,
+    parentDir: candidate.parent_dir,
+    sizeBytes: candidate.size_bytes,
+    reason: candidate.reason,
+    score: candidate.score,
+    confidence: candidate.confidence,
+    previewHint: candidate.preview_hint,
+    ageDays: candidate.age_days,
+  }
+}
+
+interface FolderStoreState {
+  platform: PlatformInfo | null
+  folders: WatchedFolder[]
+  entries: DirectoryEntry[]
+  candidates: ScanCandidate[]
+  selectedFolderId: string | null
+  isLoadingFolders: boolean
+  isLoadingEntries: boolean
+  folderError: string | null
+  entryError: string | null
+  scan: ScanInfo
+  loadPlatform: () => Promise<void>
+  loadFolders: () => Promise<void>
+  addFolder: () => Promise<void>
+  selectFolder: (id: string | null) => Promise<void>
+  loadDir: (folderId: string, pathOverride?: string) => Promise<void>
+  openInSystem: (path: string, reveal?: boolean) => Promise<void>
+  startScan: (paths?: string[]) => Promise<void>
+  refreshScanStatus: () => Promise<void>
+  loadCandidates: () => Promise<void>
+  handleScanProgress: (payload: ScanProgressPayload) => void
+  handleScanDone: (payload: ScanFinishedPayload) => Promise<void>
+  handleScanError: (payload: ScanErrorPayload) => void
+}
+
+export const useFolderStore = create<FolderStoreState>((set, get) => ({
+  platform: null,
+  folders: [],
+  entries: [],
+  candidates: [],
+  selectedFolderId: null,
+  isLoadingFolders: false,
+  isLoadingEntries: false,
+  folderError: null,
+  entryError: null,
+  scan: initialScanInfo,
+
+  async loadPlatform() {
+    try {
+      const result = await invokeCommand<BackendPlatformInfo>("get_platform_info")
+      set({
+        platform: {
+          os: result.os,
+          openLabel: result.open_label,
+        },
+      })
+    } catch (error) {
+      console.error("Failed to load platform info", error)
+    }
+  },
+
+  async loadFolders() {
+    set({ isLoadingFolders: true, folderError: null })
+    try {
+      const data = await invokeCommand<BackendWatchedFolder[]>("list_folders")
+      const folders = data.map(mapWatchedFolder)
+      set((state) => ({
+        folders,
+        isLoadingFolders: false,
+        folderError: null,
+        selectedFolderId: state.selectedFolderId && folders.some((f) => f.id === state.selectedFolderId)
+          ? state.selectedFolderId
+          : folders.length ? folders[0].id : null,
+      }))
+      const { selectedFolderId } = get()
+      if (selectedFolderId) {
+        void get().loadDir(selectedFolderId)
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to load folders", error)
+      set({
+        isLoadingFolders: false,
+        folderError: message,
+        folders: [],
+        selectedFolderId: null,
+      })
+    }
+  },
+
+  async addFolder() {
+    try {
+      const selection = await openDirectoryDialog()
+      if (!selection || Array.isArray(selection)) return
+      const folder = await invokeCommand<BackendWatchedFolder>("add_folder", { path: selection })
+      const mapped = mapWatchedFolder(folder)
+      set((state) => {
+        const existingIndex = state.folders.findIndex((f) => f.id === mapped.id)
+        const nextFolders = existingIndex >= 0
+          ? state.folders.map((f, index) => (index === existingIndex ? mapped : f))
+          : [...state.folders, mapped]
+        return {
+          folders: nextFolders,
+          selectedFolderId: mapped.id,
+        }
+      })
+      await get().loadDir(mapped.id)
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to add folder", error)
+      set({ folderError: message })
+    }
+  },
+
+  async selectFolder(id) {
+    if (!id) {
+      set({ selectedFolderId: null, entries: [], entryError: null })
+      return
+    }
+    set({ selectedFolderId: id, entryError: null })
+    await get().loadDir(id)
+  },
+
+  async loadDir(folderId, pathOverride) {
+    const folder = get().folders.find((f) => f.id === folderId)
+    if (!folder) {
+      set({ entryError: "Folder not found", entries: [] })
+      return
+    }
+    if (!folder.isAccessible) {
+      set({ entryError: "Folder is not accessible", entries: [] })
+      return
+    }
+    const rootPath = pathOverride ?? folder.path
+    set({ isLoadingEntries: true, entryError: null })
+    try {
+      const data = await invokeCommand<BackendDirectoryEntry[]>("list_dir", { rootPath })
+      set({
+        entries: data.map(mapDirectoryEntry),
+        isLoadingEntries: false,
+        entryError: null,
+      })
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to load directory entries", error)
+      set({
+        isLoadingEntries: false,
+        entryError: message,
+        entries: [],
+      })
+    }
+  },
+
+  async openInSystem(path, reveal = false) {
+    if (!path) return
+    try {
+      await invokeCommand("open_in_system", { path, reveal })
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to open in system", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+    }
+  },
+
+  async startScan(paths) {
+    try {
+      await invokeCommand("start_scan", { paths: paths ?? null })
+      await get().refreshScanStatus()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to start scan", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+    }
+  },
+
+  async refreshScanStatus() {
+    try {
+      const payload = await invokeCommand<ScanStatusPayload>("scan_status")
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          status: payload.state === "running" ? "running" : "idle",
+          scanned: payload.scanned,
+          skipped: payload.skipped,
+          errors: payload.errors,
+          startedAt: payload.started_at ?? null,
+          finishedAt: payload.finished_at ?? null,
+          currentPath: payload.current_path ?? null,
+          lastError: payload.last_error ?? null,
+        },
+      }))
+    } catch (error) {
+      console.error("Failed to refresh scan status", error)
+    }
+  },
+
+  async loadCandidates() {
+    try {
+      const items = await invokeCommand<BackendCandidate[]>("get_candidates", { max_total: 32 })
+      set({ candidates: items.map(mapCandidate) })
+    } catch (error) {
+      console.error("Failed to load candidates", error)
+    }
+  },
+
+  handleScanProgress(payload) {
+    set((state) => ({
+      scan: {
+        ...state.scan,
+        status: "running",
+        scanned: payload.scanned,
+        skipped: payload.skipped,
+        errors: payload.errors,
+        currentPath: payload.path_sample ?? null,
+      },
+    }))
+  },
+
+  async handleScanDone(payload) {
+    set((state) => ({
+      scan: {
+        status: "idle",
+        scanned: payload.scanned,
+        skipped: payload.skipped,
+        errors: payload.errors,
+        startedAt: payload.started_at ?? state.scan.startedAt ?? null,
+        finishedAt: payload.finished_at ?? new Date().toISOString(),
+        currentPath: null,
+        errorMessages: payload.error_messages,
+        lastError: payload.error_messages.at(-1) ?? null,
+      },
+    }))
+
+    await get().loadFolders()
+    const { selectedFolderId } = get()
+    if (selectedFolderId) {
+      await get().loadDir(selectedFolderId)
+    }
+    await get().loadCandidates()
+  },
+
+  handleScanError(payload) {
+    set((state) => ({
+      scan: {
+        ...state.scan,
+        errorMessages: [...state.scan.errorMessages, payload.message],
+        lastError: payload.message,
+      },
+    }))
+  },
+}))

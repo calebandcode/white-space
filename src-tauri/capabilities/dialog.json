@@ -1,0 +1,11 @@
+{
+  "identifier": "dialog-all",
+  "description": "Dialog permissions for the application",
+  "permissions": [
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-ask"
+  ]
+}

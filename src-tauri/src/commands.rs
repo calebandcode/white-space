@@ -1,0 +1,1205 @@
+use crate::db::{Database, DbPool};
+use crate::gauge::{GaugeManager, GaugeState};
+use crate::models::WatchedRoot;
+use crate::ops::{ArchiveManager, DeleteManager, UndoManager, UndoResult};
+use crate::scanner::{self, ScanResult, Scanner};
+use crate::selector::{scoring::Candidate, FileSelector};
+use chrono::{DateTime, Duration, Utc};
+use std::collections::HashSet;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use tauri::State;
+
+// Command result types
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ArchiveOutcome {
+    pub success: bool,
+    pub files_processed: usize,
+    pub total_bytes: u64,
+    pub duration_ms: u64,
+    pub errors: Vec<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeleteOutcome {
+    pub success: bool,
+    pub files_processed: usize,
+    pub total_bytes_freed: u64,
+    pub duration_ms: u64,
+    pub errors: Vec<String>,
+    pub to_trash: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StagedFile {
+    pub file_id: i64,
+    pub path: String,
+    pub size_bytes: u64,
+    pub archived_at: DateTime<Utc>,
+    pub age_days: u32,
+    pub parent_dir: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WatchedFolder {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub is_accessible: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub size: u64,
+    pub modified: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlatformInfo {
+    pub os: String,
+    pub open_label: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserPrefs {
+    pub dry_run_default: bool,
+    pub tidy_day: String,
+    pub tidy_hour: u32,
+    pub rolling_window_days: i64,
+    pub max_candidates_per_day: usize,
+    pub thumbnail_max_size: u32,
+    pub auto_scan_enabled: bool,
+    pub scan_interval_hours: u32,
+    pub archive_age_threshold_days: u32,
+    pub delete_age_threshold_days: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PartialUserPrefs {
+    pub dry_run_default: Option<bool>,
+    pub tidy_day: Option<String>,
+    pub tidy_hour: Option<u32>,
+    pub rolling_window_days: Option<i64>,
+    pub max_candidates_per_day: Option<usize>,
+    pub thumbnail_max_size: Option<u32>,
+    pub auto_scan_enabled: Option<bool>,
+    pub scan_interval_hours: Option<u32>,
+    pub archive_age_threshold_days: Option<u32>,
+    pub delete_age_threshold_days: Option<u32>,
+}
+
+// Error handling
+#[derive(Debug)]
+pub enum CommandError {
+    Database(String),
+    FileSystem(String),
+    Validation(String),
+    Permission(String),
+    NotFound(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandError::Database(msg) => write!(f, "Database error: {}", msg),
+            CommandError::FileSystem(msg) => write!(f, "File system error: {}", msg),
+            CommandError::Validation(msg) => write!(f, "Validation error: {}", msg),
+            CommandError::Permission(msg) => write!(f, "Permission error: {}", msg),
+            CommandError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            CommandError::Internal(msg) => write!(f, "Internal error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+
+fn command_error_to_string(err: CommandError) -> String {
+    err.to_string()
+}
+
+fn map_io_error(action: &str, path: &Path, err: std::io::Error) -> CommandError {
+    match err.kind() {
+        ErrorKind::NotFound => CommandError::NotFound(format!(
+            "{}: {}",
+            action,
+            path.display()
+        )),
+        ErrorKind::PermissionDenied => CommandError::Permission(format!(
+            "{}: {}",
+            action,
+            path.display()
+        )),
+        _ => CommandError::FileSystem(format!(
+            "Failed to {} {}: {}",
+            action,
+            path.display(),
+            err
+        )),
+    }
+}
+
+fn sanitize_string(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        sanitized.push(ch);
+        if sanitized.len() >= 1024 {
+            break;
+        }
+    }
+    sanitized
+}
+
+fn normalize_directory_path(path: &Path) -> Result<PathBuf, CommandError> {
+    let normalized = if path.exists() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    if normalized.is_dir() {
+        Ok(normalized)
+    } else {
+        Err(CommandError::Validation(format!(
+            "Path is not a directory: {}",
+            path.display()
+        )))
+    }
+}
+
+fn normalize_existing_path(path: &Path) -> Result<PathBuf, CommandError> {
+    if !path.exists() {
+        return Err(CommandError::NotFound(format!("Path not found: {}", path.display())));
+    }
+    path.canonicalize()
+        .or_else(|_| Ok(path.to_path_buf()))
+        .map_err(|err| map_io_error("access path", path, err))
+}
+
+fn is_system_root(path: &Path) -> bool {
+    path.parent().is_none()
+}
+
+fn watched_root_to_folder(root: WatchedRoot) -> WatchedFolder {
+    WatchedFolder {
+        id: root.id,
+        path: root.path.clone(),
+        name: Path::new(&root.path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| root.path.clone()),
+        is_accessible: Path::new(&root.path).exists(),
+    }
+}
+
+fn ensure_within_watched(path: &Path, roots: &[WatchedRoot]) -> Result<(), CommandError> {
+    if is_within_watched_roots(path, roots) {
+        Ok(())
+    } else {
+        Err(CommandError::Permission(
+            "Path must be within a watched folder".to_string(),
+        ))
+    }
+}
+
+
+
+fn validate_file_ids(file_ids: &[i64]) -> Result<(), CommandError> {
+    if file_ids.is_empty() {
+        return Err(CommandError::Validation("No file IDs provided".to_string()));
+    }
+    if file_ids.len() > 1000 {
+        return Err(CommandError::Validation(
+            "Too many files selected (max 1000)".to_string(),
+        ));
+    }
+    if file_ids.iter().any(|&id| id <= 0) {
+        return Err(CommandError::Validation("Invalid file ID".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_path(path: &str) -> Result<PathBuf, CommandError> {
+    let path_buf = PathBuf::from(path);
+    if path_buf
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(CommandError::Validation("Path traversal not allowed".to_string()));
+    }
+
+    // For absolute paths, ensure they're within reasonable user directories
+    if path_buf.is_absolute() {
+        let mut allowed_dirs = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            allowed_dirs.push(home);
+        }
+        if let Some(desktop) = dirs::desktop_dir() {
+            allowed_dirs.push(desktop);
+        }
+        if let Some(downloads) = dirs::download_dir() {
+            allowed_dirs.push(downloads);
+        }
+        if let Some(pictures) = dirs::picture_dir() {
+            allowed_dirs.push(pictures);
+        }
+        if let Some(documents) = dirs::document_dir() {
+            allowed_dirs.push(documents);
+        }
+        if let Some(music) = dirs::audio_dir() {
+            allowed_dirs.push(music);
+        }
+        if let Some(videos) = dirs::video_dir() {
+            allowed_dirs.push(videos);
+        }
+
+        let normalized = canonicalize_or_clone(&path_buf);
+        let is_allowed = allowed_dirs.iter().any(|dir| normalized.starts_with(dir));
+        if !is_allowed {
+            return Err(CommandError::Permission(
+                "Path not in allowed directories".to_string(),
+            ));
+        }
+    }
+
+    Ok(path_buf)
+}
+
+fn validate_scan_path(path: &str) -> Result<PathBuf, CommandError> {
+    let path_buf = PathBuf::from(path);
+    if path_buf
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(CommandError::Validation("Path traversal not allowed".to_string()));
+    }
+
+    // For scan operations, be more permissive - allow any path that exists and is accessible
+    if path_buf.is_absolute() {
+        // Check if path exists and is accessible
+        if !path_buf.exists() {
+            return Err(CommandError::NotFound(format!("Path does not exist: {}", path)));
+        }
+        
+        // Additional security: ensure it's not a system directory
+        if is_system_root(&path_buf) {
+            return Err(CommandError::Permission("Cannot scan system root".to_string()));
+        }
+    }
+
+    Ok(path_buf)
+}
+
+
+fn open_path_with_system(path: &Path, reveal: bool) -> Result<(), CommandError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| CommandError::Validation("Path contains invalid UTF-8".to_string()))?
+            .replace('/', "\\");
+
+        let status = if reveal {
+            let arg = format!("/select,{}", path_str);
+            Command::new("explorer").arg(arg).status()
+        } else {
+            let target = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.to_path_buf())
+            };
+            let target_str = target
+                .to_str()
+                .ok_or_else(|| CommandError::Validation("Path contains invalid UTF-8".to_string()))?
+                .replace('/', "\\");
+            Command::new("explorer").arg(target_str).status()
+        };
+
+        let status = status
+            .map_err(|e| CommandError::FileSystem(format!("Failed to launch Explorer: {}", e)))?;
+
+        if !status.success() {
+            if status.code() == Some(1) {
+                return Ok(());
+            }
+            return Err(CommandError::FileSystem(
+                "Explorer returned an error".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| CommandError::Validation("Path contains invalid UTF-8".to_string()))?;
+
+        let status = if reveal {
+            Command::new("open").arg("-R").arg(path_str).status()
+        } else {
+            let target = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.to_path_buf())
+            };
+            let target_str = target.to_str().ok_or_else(|| {
+                CommandError::Validation("Path contains invalid UTF-8".to_string())
+            })?;
+            Command::new("open").arg(target_str).status()
+        };
+
+        let status = status
+            .map_err(|e| CommandError::FileSystem(format!("Failed to launch open: {}", e)))?;
+
+        if !status.success() {
+            return Err(CommandError::FileSystem(
+                "open returned an error".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::process::Command;
+
+        let target = if reveal && path.is_file() {
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| path.to_path_buf())
+        } else if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| path.to_path_buf())
+        };
+
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| CommandError::Validation("Path contains invalid UTF-8".to_string()))?;
+
+        let status = Command::new("xdg-open")
+            .arg(target_str)
+            .status()
+            .map_err(|e| CommandError::FileSystem(format!("Failed to launch xdg-open: {}", e)))?;
+
+        if !status.success() {
+            return Err(CommandError::FileSystem(
+                "xdg-open returned an error".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(CommandError::Internal(
+        "Unsupported platform for open_in_system".to_string(),
+    ))
+}
+
+fn canonicalize_or_clone(path: &Path) -> PathBuf {
+    match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+fn path_within_root(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+fn is_within_watched_roots(path: &Path, roots: &[WatchedRoot]) -> bool {
+    roots.iter().any(|root| {
+        let root_path = canonicalize_or_clone(Path::new(&root.path));
+        path_within_root(path, &root_path)
+    })
+}
+
+fn list_directory_entries(dir: &Path) -> Result<Vec<DirectoryEntry>, CommandError> {
+    let read_dir = fs::read_dir(dir).map_err(|err| map_io_error("open directory", dir, err))?;
+    let mut entries = Vec::new();
+
+    for entry_result in read_dir {
+        let entry = entry_result.map_err(|err| map_io_error("read directory entry", dir, err))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|err| map_io_error("inspect entry", &entry_path, err))?;
+
+        let name = entry
+            .file_name()
+            .to_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        let kind = if metadata.is_dir() { "dir" } else { "file" }.to_string();
+        let size = if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        entries.push(DirectoryEntry {
+            name,
+            path: entry_path.to_string_lossy().to_string(),
+            kind,
+            size,
+            modified,
+        });
+    }
+
+    entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries)
+}
+
+// Database state management
+// AppState removed - using DbPool directly now
+
+// Tauri Commands
+
+#[tauri::command]
+pub async fn add_folder(path: String, db: State<'_, DbPool>) -> Result<WatchedFolder, String> {
+    let validated = validate_path(&path).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+    let normalized = normalize_directory_path(&validated).map_err(command_error_to_string)?;
+
+    if is_system_root(&normalized) {
+        return Err("ERR_VALIDATION: Watching the system root is not supported".to_string());
+    }
+
+    let normalized_path = normalized.to_string_lossy().to_string();
+
+    let db_clone = db.inner().clone();
+    let path_for_db = normalized_path.clone();
+    let root = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let id = db_instance
+            .upsert_watched_root(&path_for_db)
+            .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        db_instance
+            .get_watched_root_by_id(id)
+            .map_err(|e| format!("ERR_DATABASE: {}", e))?
+            .ok_or_else(|| "ERR_DATABASE: Watched folder not found after insert".to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(watched_root_to_folder(root))
+}
+
+#[tauri::command]
+pub async fn pick_directory(window: tauri::Window) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+
+    window.dialog().file().pick_folder(move |folder| {
+        let selection = folder.map(|path| match path {
+            FilePath::Path(p) => p.to_string_lossy().into_owned(),
+            FilePath::Url(url) => url.to_string(),
+        });
+        let _ = sender.send(selection);
+    });
+
+    receiver
+        .await
+        .map_err(|e| format!("ERR_INTERNAL: failed to open dialog: {e}"))
+}
+
+#[tauri::command]
+pub async fn list_folders(db: State<'_, DbPool>) -> Result<Vec<WatchedFolder>, String> {
+    let db_clone = db.inner().clone();
+    let folders = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        db_instance
+            .list_watched_roots()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(folders.into_iter().map(watched_root_to_folder).collect())
+}
+
+#[tauri::command]
+pub fn get_platform_info() -> PlatformInfo {
+    #[cfg(target_os = "windows")]
+    {
+        return PlatformInfo {
+            os: "windows".to_string(),
+            open_label: "Open in File Explorer".to_string(),
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return PlatformInfo {
+            os: "macos".to_string(),
+            open_label: "Open in Finder".to_string(),
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return PlatformInfo {
+            os: "linux".to_string(),
+            open_label: "Open in File Manager".to_string(),
+        };
+    }
+
+    #[allow(unreachable_code)]
+    PlatformInfo {
+        os: std::env::consts::OS.to_string(),
+        open_label: "Open in File Manager".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn list_dir(
+    root_path: String,
+    db: State<'_, DbPool>,
+) -> Result<Vec<DirectoryEntry>, String> {
+    if root_path.trim().is_empty() {
+        return Err("ERR_VALIDATION: Path cannot be empty".to_string());
+    }
+
+    let normalized =
+        normalize_directory_path(Path::new(&root_path)).map_err(command_error_to_string)?;
+    let path_for_listing = normalized.clone();
+
+    let db_clone = db.inner().clone();
+    let watched_roots = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        db_instance
+            .list_watched_roots()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    ensure_within_watched(&normalized, &watched_roots).map_err(command_error_to_string)?;
+
+    let entries = tokio::task::spawn_blocking(move || {
+        list_directory_entries(&path_for_listing).map_err(command_error_to_string)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn open_in_system(
+    path: String,
+    reveal: Option<bool>,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("ERR_VALIDATION: Path cannot be empty".to_string());
+    }
+
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let normalized =
+            normalize_existing_path(Path::new(&path)).map_err(command_error_to_string)?;
+        let metadata = fs::metadata(&normalized)
+            .map_err(|err| map_io_error("access path", &normalized, err))
+            .map_err(command_error_to_string)?;
+        let check_path = if metadata.is_dir() {
+            normalized.clone()
+        } else {
+            normalized
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| normalized.clone())
+        };
+        let is_file = metadata.is_file();
+
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let roots = db_instance
+            .list_watched_roots()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+
+        ensure_within_watched(&check_path, &roots).map_err(command_error_to_string)?;
+
+        let reveal_flag = reveal.unwrap_or(is_file);
+        open_path_with_system(&normalized, reveal_flag).map_err(command_error_to_string)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_scan(
+    paths: Option<Vec<String>>,
+    app: tauri::AppHandle,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
+    let provided = paths.unwrap_or_default();
+    let db_clone = db.inner().clone();
+    let roots = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        if provided.is_empty() {
+            db_instance
+                .list_watched_paths()
+                .map_err(|e| format!("ERR_DATABASE: {}", e))
+        } else {
+            Ok(provided)
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    if roots.is_empty() {
+        return Err("ERR_VALIDATION: No scan roots configured".to_string());
+    }
+
+    let mut unique = HashSet::new();
+    let mut sanitized = Vec::new();
+    for root in roots {
+        validate_scan_path(&root).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+        if !Path::new(&root).is_dir() {
+            return Err(format!("ERR_VALIDATION: Path is not a directory: {}", root));
+        }
+        let clean = sanitize_string(&root);
+        if unique.insert(clean.clone()) {
+            sanitized.push(clean);
+        }
+    }
+
+    scanner::start_scan(app, db.inner().clone(), sanitized)
+        .map_err(|e| format!("ERR_SCAN: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn scan_status() -> Result<scanner::ScanStatusPayload, String> {
+    Ok(scanner::current_status())
+}
+
+#[tauri::command]
+pub async fn get_candidates(
+    max_total: usize,
+    db: State<'_, DbPool>,
+) -> Result<Vec<Candidate>, String> {
+    daily_candidates(max_total, db).await
+}
+
+#[tauri::command]
+pub async fn scan_roots(
+    roots: Vec<String>,
+    app: tauri::AppHandle,
+    db: State<'_, DbPool>,
+) -> Result<ScanResult, String> {
+    println!("scan_roots called with roots: {:?}", roots);
+
+    if roots.is_empty() {
+        return Err("ERR_VALIDATION: No scan roots provided".to_string());
+    }
+
+    if roots.len() > 10 {
+        return Err("ERR_VALIDATION: Too many scan roots (max 10)".to_string());
+    }
+
+    let mut unique = HashSet::new();
+    let mut sanitized_roots = Vec::new();
+    for root in &roots {
+        validate_scan_path(root).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+        if !Path::new(root).is_dir() {
+            return Err(format!("ERR_VALIDATION: Path is not a directory: {}", root));
+        }
+        let clean = sanitize_string(root);
+        if unique.insert(clean.clone()) {
+            sanitized_roots.push(clean);
+        }
+    }
+
+    let db_clone = db.inner().clone();
+    let app_handle = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let mut scanner = Scanner::new();
+        scanner
+            .run_scan(&app_handle, sanitized_roots, &db_instance)
+            .map_err(|e| format!("ERR_SCAN: {e}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn daily_candidates(
+    max_total: usize,
+    db: State<'_, DbPool>,
+) -> Result<Vec<Candidate>, String> {
+    println!("daily_candidates called with max_total: {}", max_total);
+
+    // Validate input
+    if max_total == 0 {
+        return Err("ERR_VALIDATION: max_total must be greater than 0".to_string());
+    }
+
+    if max_total > 1000 {
+        return Err("ERR_VALIDATION: max_total too large (max 1000)".to_string());
+    }
+
+    // Get candidates using spawn_blocking for database operations
+    let db_clone = db.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let selector = FileSelector::new();
+        let db_instance = Database::new(conn);
+        selector
+            .daily_candidates(max_total, &db_instance)
+            .map_err(|e| format!("ERR_SELECTOR: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn gauge_state(db: State<'_, DbPool>) -> Result<GaugeState, String> {
+    println!("gauge_state called");
+    let db_clone = db.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let gauge_manager = GaugeManager::new();
+        let db_instance = Database::new(conn);
+        gauge_manager
+            .gauge_state(&db_instance)
+            .map_err(|e| format!("ERR_GAUGE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn archive_files(
+    file_ids: Vec<i64>,
+    db: State<'_, DbPool>,
+) -> Result<ArchiveOutcome, String> {
+    // Validate input
+    validate_file_ids(&file_ids).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+
+    // Perform archive operation using spawn_blocking for database operations
+    let db_clone = db.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+
+        // Get file paths from database
+        let mut file_paths = Vec::new();
+        for file_id in &file_ids {
+            match db_instance.get_file_by_id(*file_id) {
+                Ok(Some(file)) => {
+                    validate_path(&file.path).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+                    file_paths.push(file.path);
+                }
+                Ok(None) => {
+                    return Err(format!("ERR_NOT_FOUND: File with ID {} not found", file_id));
+                }
+                Err(e) => {
+                    return Err(format!("ERR_DATABASE: {}", e));
+                }
+            }
+        }
+
+        // Perform archive operation
+        let mut archive_manager = ArchiveManager::new();
+        archive_manager
+            .archive_files(file_paths, &db_instance)
+            .map_err(|e| format!("ERR_ARCHIVE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(ArchiveOutcome {
+        success: result.errors.is_empty(),
+        files_processed: result.files_archived,
+        total_bytes: result.total_bytes,
+        duration_ms: result.duration_ms,
+        errors: result.errors,
+        dry_run: false, // TODO: Get from user preferences
+    })
+}
+
+#[tauri::command]
+pub async fn delete_files(
+    file_ids: Vec<i64>,
+    to_trash: bool,
+    db: State<'_, DbPool>,
+) -> Result<DeleteOutcome, String> {
+    // Validate input
+    validate_file_ids(&file_ids).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+
+    // Perform delete operation using spawn_blocking for database operations
+    let db_clone = db.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+
+        // Get file paths from database
+        let mut file_paths = Vec::new();
+        for file_id in &file_ids {
+            match db_instance.get_file_by_id(*file_id) {
+                Ok(Some(file)) => {
+                    validate_path(&file.path).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+                    file_paths.push(file.path);
+                }
+                Ok(None) => {
+                    return Err(format!("ERR_NOT_FOUND: File with ID {} not found", file_id));
+                }
+                Err(e) => {
+                    return Err(format!("ERR_DATABASE: {}", e));
+                }
+            }
+        }
+
+        // Perform delete operation
+        let mut delete_manager = DeleteManager::new();
+        delete_manager.set_use_trash(to_trash);
+
+        delete_manager
+            .delete_files(file_paths, &db_instance)
+            .map_err(|e| format!("ERR_DELETE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(DeleteOutcome {
+        success: result.errors.is_empty(),
+        files_processed: result.files_deleted,
+        total_bytes_freed: result.total_bytes_freed,
+        duration_ms: result.duration_ms,
+        errors: result.errors,
+        to_trash,
+    })
+}
+
+#[tauri::command]
+pub async fn undo_last(db: State<'_, DbPool>) -> Result<UndoResult, String> {
+    let db_clone = db.inner().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let mut undo_manager = UndoManager::new();
+        undo_manager
+            .undo_last(&db_instance)
+            .map_err(|e| format!("ERR_UNDO: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_review_items(
+    min_age_days: u32,
+    db: State<'_, DbPool>,
+) -> Result<Vec<StagedFile>, String> {
+    // Validate input
+    if min_age_days > 365 {
+        return Err("ERR_VALIDATION: min_age_days too large (max 365)".to_string());
+    }
+
+    // Get staged files (archived but not deleted)
+    let cutoff_date = Utc::now() - Duration::days(min_age_days as i64);
+
+    // This would query the database for staged files
+    // For now, return empty vector as placeholder
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+pub async fn get_thumbnail(
+    file_id: i64,
+    max_px: u32,
+    db: State<'_, DbPool>,
+) -> Result<String, String> {
+    // Validate input
+    if file_id <= 0 {
+        return Err("ERR_VALIDATION: Invalid file ID".to_string());
+    }
+
+    if max_px == 0 || max_px > 2048 {
+        return Err("ERR_VALIDATION: Invalid thumbnail size (1-2048px)".to_string());
+    }
+
+    // Get file from database using spawn_blocking
+    let db_clone = db.inner().clone();
+    let file = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        match db_instance.get_file_by_id(file_id) {
+            Ok(Some(file)) => Ok(file),
+            Ok(None) => Err(format!("ERR_NOT_FOUND: File with ID {} not found", file_id)),
+            Err(e) => Err(format!("ERR_DATABASE: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    // Validate file path
+    validate_path(&file.path).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
+
+    // Check if file exists
+    if !Path::new(&file.path).exists() {
+        return Err("ERR_NOT_FOUND: File does not exist on disk".to_string());
+    }
+
+    // Generate thumbnail (placeholder implementation)
+    // In a real implementation, this would:
+    // 1. Check if thumbnail already exists in cache
+    // 2. Generate thumbnail if needed
+    // 3. Return base64 encoded thumbnail or file path
+
+    Ok("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==".to_string())
+}
+
+#[tauri::command]
+pub async fn get_prefs(db: State<'_, DbPool>) -> Result<UserPrefs, String> {
+    // Get preferences from database using spawn_blocking
+    let db_clone = db.inner().clone();
+    let prefs = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        db_instance
+            .get_all_preferences()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    // Convert to UserPrefs struct
+    Ok(UserPrefs {
+        dry_run_default: prefs
+            .get("dry_run_default")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
+        tidy_day: prefs
+            .get("tidy_day")
+            .cloned()
+            .unwrap_or_else(|| "Fri".to_string()),
+        tidy_hour: prefs
+            .get("tidy_hour")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(17),
+        rolling_window_days: prefs
+            .get("rolling_window_days")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7),
+        max_candidates_per_day: prefs
+            .get("max_candidates_per_day")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12),
+        thumbnail_max_size: prefs
+            .get("thumbnail_max_size")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256),
+        auto_scan_enabled: prefs
+            .get("auto_scan_enabled")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
+        scan_interval_hours: prefs
+            .get("scan_interval_hours")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24),
+        archive_age_threshold_days: prefs
+            .get("archive_age_threshold_days")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7),
+        delete_age_threshold_days: prefs
+            .get("delete_age_threshold_days")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
+    })
+}
+
+#[tauri::command]
+pub async fn set_prefs(prefs: PartialUserPrefs, db: State<'_, DbPool>) -> Result<(), String> {
+    // Validate input
+    if let Some(tidy_hour) = prefs.tidy_hour {
+        if tidy_hour > 23 {
+            return Err("ERR_VALIDATION: tidy_hour must be 0-23".to_string());
+        }
+    }
+
+    if let Some(rolling_window_days) = prefs.rolling_window_days {
+        if rolling_window_days <= 0 || rolling_window_days > 365 {
+            return Err("ERR_VALIDATION: rolling_window_days must be 1-365".to_string());
+        }
+    }
+
+    if let Some(max_candidates_per_day) = prefs.max_candidates_per_day {
+        if max_candidates_per_day == 0 || max_candidates_per_day > 1000 {
+            return Err("ERR_VALIDATION: max_candidates_per_day must be 1-1000".to_string());
+        }
+    }
+
+    if let Some(thumbnail_max_size) = prefs.thumbnail_max_size {
+        if thumbnail_max_size == 0 || thumbnail_max_size > 2048 {
+            return Err("ERR_VALIDATION: thumbnail_max_size must be 1-2048".to_string());
+        }
+    }
+
+    if let Some(scan_interval_hours) = prefs.scan_interval_hours {
+        if scan_interval_hours == 0 || scan_interval_hours > 168 {
+            return Err("ERR_VALIDATION: scan_interval_hours must be 1-168".to_string());
+        }
+    }
+
+    if let Some(archive_age_threshold_days) = prefs.archive_age_threshold_days {
+        if archive_age_threshold_days > 365 {
+            return Err("ERR_VALIDATION: archive_age_threshold_days must be 0-365".to_string());
+        }
+    }
+
+    if let Some(delete_age_threshold_days) = prefs.delete_age_threshold_days {
+        if delete_age_threshold_days > 365 {
+            return Err("ERR_VALIDATION: delete_age_threshold_days must be 0-365".to_string());
+        }
+    }
+
+    // Set preferences in database using spawn_blocking
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+
+        if let Some(dry_run_default) = prefs.dry_run_default {
+            db_instance
+                .set_preference("dry_run_default", &dry_run_default.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(tidy_day) = prefs.tidy_day {
+            let sanitized_day = sanitize_string(&tidy_day);
+            db_instance
+                .set_preference("tidy_day", &sanitized_day)
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(tidy_hour) = prefs.tidy_hour {
+            db_instance
+                .set_preference("tidy_hour", &tidy_hour.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(rolling_window_days) = prefs.rolling_window_days {
+            db_instance
+                .set_preference("rolling_window_days", &rolling_window_days.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(max_candidates_per_day) = prefs.max_candidates_per_day {
+            db_instance
+                .set_preference(
+                    "max_candidates_per_day",
+                    &max_candidates_per_day.to_string(),
+                )
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(thumbnail_max_size) = prefs.thumbnail_max_size {
+            db_instance
+                .set_preference("thumbnail_max_size", &thumbnail_max_size.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(auto_scan_enabled) = prefs.auto_scan_enabled {
+            db_instance
+                .set_preference("auto_scan_enabled", &auto_scan_enabled.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(scan_interval_hours) = prefs.scan_interval_hours {
+            db_instance
+                .set_preference("scan_interval_hours", &scan_interval_hours.to_string())
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(archive_age_threshold_days) = prefs.archive_age_threshold_days {
+            db_instance
+                .set_preference(
+                    "archive_age_threshold_days",
+                    &archive_age_threshold_days.to_string(),
+                )
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        if let Some(delete_age_threshold_days) = prefs.delete_age_threshold_days {
+            db_instance
+                .set_preference(
+                    "delete_age_threshold_days",
+                    &delete_age_threshold_days.to_string(),
+                )
+                .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        }
+
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(())
+}
+
+// Helper function to get database path
+pub fn get_db_path() -> Result<PathBuf, CommandError> {
+    let app_data_dir = dirs::data_dir()
+        .ok_or_else(|| CommandError::Internal("Failed to get app data dir".to_string()))?;
+    let db_dir = app_data_dir.join("white-space");
+
+    // Create directory if it doesn't exist
+    std::fs::create_dir_all(&db_dir)
+        .map_err(|e| CommandError::FileSystem(format!("Failed to create db directory: {}", e)))?;
+
+    Ok(db_dir.join("database.db"))
+}
+
+#[cfg(test)]
+mod tests;
+
+

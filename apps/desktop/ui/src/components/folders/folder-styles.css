@@ -1,0 +1,114 @@
+﻿.folder-item {
+  --folder-outline: hsl(var(--primary));
+  --folder-selected-bg: color-mix(in srgb, hsl(var(--primary)) 18%, transparent);
+  position: relative;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.folder-item[data-disabled="true"] {
+  filter: grayscale(0.35);
+  opacity: 0.6;
+}
+
+.folder-item:not([data-disabled="true"]):hover {
+  transform: translateY(-2px);
+}
+
+.folder-item[data-selected="true"] .folder-icon {
+  outline: 2px solid var(--folder-outline);
+  outline-offset: 2px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.folder-item[data-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 14px;
+  background: rgba(59, 130, 246, 0.14);
+  background: var(--folder-selected-bg);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.folder-icon {
+  width: 84px;
+  height: 60px;
+  border-radius: 14px;
+  position: relative;
+  background: var(--folder-body, linear-gradient(#f7d186, #f3b95f));
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+  transition: box-shadow 160ms ease, transform 160ms ease, outline 160ms ease;
+}
+
+.folder-icon::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 10px;
+  width: 36px;
+  height: 14px;
+  border-radius: 6px 6px 0 0;
+  background: var(--folder-tab, #fbe3b2);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+.folder-item[data-disabled="true"] .folder-icon {
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+
+.folder-item:not([data-disabled="true"]):hover .folder-icon {
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+}
+
+.folder--win {
+  --folder-body: linear-gradient(180deg, #f7d186 0%, #f3b95f 85%);
+  --folder-tab: #fbe3b2;
+}
+
+.folder--mac {
+  --folder-body: linear-gradient(180deg, #65b5ff 0%, #3a8dff 85%);
+  --folder-tab: #a7d2ff;
+}
+
+.dark .folder-icon {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+}
+
+.dark .folder-item[data-selected="true"] .folder-icon {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+.folder-add-tile::before,
+.folder-add-tile::after {
+  content: "";
+  position: absolute;
+  background-color: currentColor;
+  border-radius: 9999px;
+}
+
+.folder-add-tile::before {
+  width: 3px;
+  height: 20px;
+  top: calc(50% - 10px);
+  left: calc(50% - 1.5px);
+}
+
+.folder-add-tile::after {
+  width: 20px;
+  height: 3px;
+  top: calc(50% - 1.5px);
+  left: calc(50% - 10px);
+}
+
+
+.folder-add-icon {
+  --folder-body: linear-gradient(180deg, #f6f6f8 0%, #e8e9ed 90%);
+  --folder-tab: #ffffff;
+  color: hsl(var(--primary));
+}
+
+.dark .folder-add-icon {
+  --folder-body: linear-gradient(180deg, #1f2937 0%, #111827 90%);
+  --folder-tab: #374151;
+}
