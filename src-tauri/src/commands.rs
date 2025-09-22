@@ -142,6 +142,38 @@ pub struct PartialUserPrefs {
     pub delete_age_threshold_days: Option<u32>,
 }
 
+/// Parameters for querying bucketed candidates
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GetCandidatesBucketedParams {
+    /// Maximum number of results to return
+    pub limit: Option<usize>,
+    
+    /// Number of results to skip (for pagination)
+    pub offset: Option<usize>,
+    
+    /// Minimum confidence score for including candidates
+    pub min_confidence: Option<f64>,
+    
+    /// Maximum number of results to return per bucket
+    pub max_results_per_bucket: Option<usize>,
+    
+    /// Whether to include archived files in results
+    pub include_archived: Option<bool>,
+    
+    /// Whether to include deleted files in results
+    pub include_deleted: Option<bool>,
+    
+    /// Optional path to scope the results to a specific directory
+    #[serde(default)]
+    pub root_path: Option<String>,
+    
+    /// Optional list of bucket types to include
+    pub buckets: Option<Vec<String>>,
+    
+    /// Sorting criteria (e.g., "size_desc", "age_desc", "name_asc")
+    pub sort: Option<String>,
+}
+
 // Error handling
 #[derive(Debug)]
 pub enum CommandError {
@@ -779,14 +811,6 @@ fn normalize_bucket_key(reason: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct GetCandidatesBucketedParams {
-    pub root_paths: Option<Vec<String>>, // currently unused, defaults to watched roots
-    pub buckets: Option<Vec<String>>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-    pub sort: Option<String>,
-}
 
 #[tauri::command]
 pub async fn get_candidates_bucketed(
@@ -794,11 +818,15 @@ pub async fn get_candidates_bucketed(
     db: State<'_, DbPool>,
 ) -> Result<CandidatesResponse, String> {
     let params = params.unwrap_or(GetCandidatesBucketedParams {
-        root_paths: None,
+        root_path: None,
         buckets: None,
         limit: Some(100),
         offset: Some(0),
         sort: Some("size_desc".to_string()),
+        min_confidence: None,
+        max_results_per_bucket: None,
+        include_archived: None,
+        include_deleted: None,
     });
 
     let limit = params.limit.unwrap_or(100).min(1000);
@@ -806,7 +834,7 @@ pub async fn get_candidates_bucketed(
     if limit == 0 { return Err("ERR_VALIDATION: limit must be > 0".to_string()); }
 
     let db_clone = db.inner().clone();
-    let (mut candidates, errors) = tokio::task::spawn_blocking(move || {
+    let (mut candidates, mut errors) = tokio::task::spawn_blocking(move || {
         let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
         let selector = FileSelector::new();
         let db_instance = Database::new(conn);
@@ -818,10 +846,42 @@ pub async fn get_candidates_bucketed(
     .await
     .map_err(|e| format!("join error: {e}"))??;
 
+    // Filter by root path if provided
+    if let Some(root_path) = params.root_path.as_deref() {
+        // Normalize the root path to ensure consistent path separators
+        let root_path = PathBuf::from(root_path);
+        let root_path = if let Ok(canonical) = root_path.canonicalize() {
+            canonical
+        } else {
+            // If we can't canonicalize, use the path as-is but log a warning
+            errors.push(format!("Warning: Could not canonicalize path: {}", root_path.display()));
+            root_path
+        };
+        
+        // Convert to string for path comparison
+        let root_path_str = root_path.to_string_lossy().to_string();
+        
+        // Filter candidates to only include those under the root path
+        candidates.retain(|candidate| {
+            let candidate_path = Path::new(&candidate.path);
+            if let Ok(canon_candidate) = candidate_path.canonicalize() {
+                let canon_str = canon_candidate.to_string_lossy().to_string();
+                canon_str.starts_with(&root_path_str)
+            } else {
+                // Fallback to string comparison if canonicalization fails
+                candidate.path.starts_with(&root_path_str)
+            }
+        });
+    }
+
     // Filter by requested buckets if provided
-    if let Some(filter) = params.buckets.as_ref() {
-        let set: std::collections::HashSet<String> = filter.iter().map(|s| s.to_lowercase()).collect();
-        candidates.retain(|c| set.contains(&normalize_bucket_key(&c.reason)));
+    let requested_buckets: std::collections::HashSet<String> = params.buckets
+        .as_ref()
+        .map(|buckets| buckets.iter().map(|s| normalize_bucket_key(s)).collect())
+        .unwrap_or_default();
+        
+    if !requested_buckets.is_empty() {
+        candidates.retain(|c| requested_buckets.contains(&normalize_bucket_key(&c.reason)));
     }
 
     // Sort
@@ -864,17 +924,21 @@ pub async fn get_candidates_bucketed(
 
     // Fallback: if we have no candidates yet (e.g., first run, scan not completed),
     // surface a shallow pass of obvious executables and old desktop/download items
-    if total_count == 0 {
+    // Skip fallback if we have a specific root_path and buckets filter
+    if total_count == 0 && params.root_path.is_none() {
+        // Use watched roots for fallback
         let db_clone = db.inner().clone();
-        let roots = tokio::task::spawn_blocking(move || {
-            let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
-            let db_instance = Database::new(conn);
-            db_instance
-                .list_watched_paths()
-                .map_err(|e| format!("ERR_DATABASE: {}", e))
-        })
-        .await
-        .map_err(|e| format!("join error: {e}"))??;
+        let roots = {
+            tokio::task::spawn_blocking(move || {
+                let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+                let db_instance = Database::new(conn);
+                db_instance
+                    .list_watched_paths()
+                    .map_err(|e| format!("ERR_DATABASE: {}", e))
+            })
+            .await
+            .map_err(|e| format!("join error: {e}"))??
+        };
 
         let now = std::time::SystemTime::now();
         let thirty_days = std::time::Duration::from_secs(30 * 24 * 3600);

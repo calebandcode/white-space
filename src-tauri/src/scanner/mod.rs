@@ -162,6 +162,7 @@ pub fn start_scan<R: tauri::Runtime>(
     Ok(())
 }
 
+
 pub fn current_status() -> ScanStatusPayload {
     let status = SCAN_STATUS.lock().expect("scan status lock");
     ScanStatusPayload {

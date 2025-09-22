@@ -72,6 +72,18 @@ type BackendCandidate = {
   age_days: number
 }
 
+// Bucketed endpoint response types (minimal)
+type UiCandidate = {
+  id: number
+  path: string
+  parent: string
+  size: number
+  reason: string
+}
+type CandidatesResponse = {
+  by_bucket: Record<string, UiCandidate[]>
+}
+
 type BackendUndoBatchSummary = {
   batch_id: string
   action_type: string
@@ -412,8 +424,44 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async loadCandidates() {
     try {
-      const items = await invokeCommand<BackendCandidate[]>("get_candidates", { maxTotal: 32 })
-      set({ candidates: items.map(mapCandidate), selectedCandidateIds: [] })
+      const state = get()
+      const folder = state.folders.find((f) => f.id === state.selectedFolderId)
+      if (!folder) {
+        console.error('No folder selected')
+        return
+      }
+      
+      // Use the folder's path as root_path to scope the candidates
+      const response = await invokeCommand<CandidatesResponse>(
+        "get_candidates_bucketed",
+        { 
+          params: { 
+            root_path: folder.path,
+            limit: 100, 
+            offset: 0, 
+            sort: "size_desc",
+            // Include all bucket types
+            buckets: ["duplicate", "big_download", "old_desktop", "screenshot", "executable", "other"]
+          } 
+        }
+      )
+      const flattened: BackendCandidate[] = []
+      for (const [bucket, arr] of Object.entries(response.by_bucket ?? {})) {
+        for (const c of arr) {
+          flattened.push({
+            file_id: c.id || 0,
+            path: c.path,
+            parent_dir: c.parent,
+            size_bytes: c.size,
+            reason: bucket,
+            score: 0,
+            confidence: 0,
+            preview_hint: "",
+            age_days: 0,
+          })
+        }
+      }
+      set({ candidates: flattened.map(mapCandidate), selectedCandidateIds: [] })
     } catch (error) {
       console.error("Failed to load candidates", error)
     }
