@@ -80,7 +80,7 @@ export function Activity() {
       </section>
 
       <section className="space-y-4">
-        {renderBucket("duplicates", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
+        {renderBucket("duplicate", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
         {renderBucket("big_download", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
         {renderBucket("old_desktop", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}
         {renderBucket("screenshot", candidates, toggleCandidate, selectedCandidateIds, handleOpenPath)}

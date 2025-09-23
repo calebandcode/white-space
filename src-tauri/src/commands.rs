@@ -886,12 +886,14 @@ pub async fn get_candidates_bucketed(
     if limit == 0 { return Err("ERR_VALIDATION: limit must be > 0".to_string()); }
 
     let db_clone = db.inner().clone();
+    // If root_path is provided, pull a larger pool to avoid filtering away all results
+    let fetch_size = if params.root_path.is_some() { (limit + offset).saturating_mul(50).min(10_000) } else { limit + offset };
     let (mut candidates, mut errors) = tokio::task::spawn_blocking(move || {
         let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
         let selector = FileSelector::new();
         let db_instance = Database::new(conn);
         let mut items = selector
-            .daily_candidates(limit + offset, &db_instance)
+            .daily_candidates(fetch_size, &db_instance)
             .map_err(|e| format!("ERR_SELECTOR: {}", e))?;
         Ok::<(Vec<Candidate>, Vec<String>), String>((items.drain(..).collect(), Vec::new()))
     })
@@ -944,6 +946,7 @@ pub async fn get_candidates_bucketed(
         _ => {}
     }
 
+    // Recompute total_count AFTER filtering and sorting
     let mut total_count = candidates.len();
     let slice_end = (offset + limit).min(total_count);
     let paged = if offset < total_count { candidates[offset..slice_end].to_vec() } else { Vec::new() };
