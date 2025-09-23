@@ -89,7 +89,7 @@ export default function BottomBar({
   const hasErrors = errorMessages.length > 0
 
   return (
-    <div className="sticky bottom-0 z-40 border-t border-border/60 bg-background/80 mt-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <div className="sticky bottom-0 z-40 border-t border-border/60 bg-background/80 mt-15 pt-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div className="flex flex-1 items-center gap-2 text-xs">
           {statusContent}

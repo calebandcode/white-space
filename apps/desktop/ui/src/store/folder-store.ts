@@ -447,19 +447,35 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   async refreshScanStatus() {
     try {
       const payload = await invokeCommand<ScanStatusPayload>("scan_status")
-      set((state) => ({
+      const prev = get().scan
+      const nextStatus = payload.state === "running" ? "running" : "idle"
+      const wasRunning = prev.status === "running"
+      const nowIdle = wasRunning && nextStatus === "idle"
+
+      set(() => ({
         scan: {
-          ...state.scan,
-          status: payload.state === "running" ? "running" : "idle",
+          status: nextStatus,
           scanned: payload.scanned,
           skipped: payload.skipped,
           errors: payload.errors,
           startedAt: payload.started_at ?? null,
           finishedAt: payload.finished_at ?? null,
           currentPath: payload.current_path ?? null,
+          errorMessages: prev.errorMessages,
           lastError: payload.last_error ?? null,
         },
       }))
+
+      if (nowIdle) {
+        // Scan just finished: refresh views and candidates
+        const selectedFolderId = get().selectedFolderId
+        await get().loadFolders()
+        await get().loadGauge()
+        if (selectedFolderId) {
+          await get().loadDir(selectedFolderId)
+        }
+        await get().loadCandidates()
+      }
     } catch (error) {
       console.error("Failed to refresh scan status", error)
     }

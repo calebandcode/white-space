@@ -61,7 +61,7 @@ export function FolderGrid({
   return (
     <div className="flex justify-center">
       <div
-        className="grid w-full max-w-[420px] grid-cols-3 gap-3 px-3 pb-3 pt-2 md:gap-10"
+        className="grid w-full max-w-[420px] grid-cols-3 gap-3 px-3 pb-3 pt-2 md:gap-10 mb-2.5"
         role="list"
         data-folder-grid
         data-columns={columns}

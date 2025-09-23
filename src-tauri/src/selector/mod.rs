@@ -5,6 +5,7 @@ use crate::models::{ActionType, File};
 use chrono::{DateTime, Duration, Utc};
 use scoring::{Candidate, FileScorer, ScoringContext};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct BucketConfig {
@@ -131,31 +132,47 @@ impl FileSelector {
         }
     }
 
-    fn is_screenshot(&self, file: &File) -> bool {
-        let path_lower = file.path.to_lowercase();
-        let parent_lower = file.parent_dir.to_lowercase();
+    fn path_has_segment(path_str: &str, target_lower: &str) -> bool {
+        let path = Path::new(path_str);
+        for comp in path.components() {
+            let s = comp.as_os_str().to_string_lossy().to_lowercase();
+            if s == target_lower {
+                return true;
+            }
+        }
+        false
+    }
 
-        // Name contains "screenshot" OR under /Screenshots/
-        path_lower.contains("screenshot") || parent_lower.contains("/screenshots/")
+    fn filename_contains(path_str: &str, needle_lower: &str) -> bool {
+        Path::new(path_str)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase().contains(needle_lower))
+            .unwrap_or(false)
+    }
+
+    fn is_screenshot(&self, file: &File) -> bool {
+        // Name contains "screenshot" OR parent has a segment named "screenshots"
+        Self::filename_contains(&file.path, "screenshot")
+            || Self::path_has_segment(&file.parent_dir, "screenshots")
     }
 
     fn is_big_download(&self, file: &File) -> bool {
-        let parent_lower = file.parent_dir.to_lowercase();
+        let in_downloads = Self::path_has_segment(&file.parent_dir, "downloads");
         let size_mb = file.size_bytes as f64 / (1024.0 * 1024.0);
         let age_days = self.scorer.calculate_age_days(file);
 
         // Under Downloads, size > 100MB, unopened OR age > 30d
-        parent_lower.contains("/downloads/")
-            && size_mb > 100.0
+        in_downloads && size_mb > 100.0
             && (file.last_opened_at.is_none() || age_days > 30.0)
     }
 
     fn is_old_desktop(&self, file: &File) -> bool {
-        let parent_lower = file.parent_dir.to_lowercase();
+        let in_desktop = Self::path_has_segment(&file.parent_dir, "desktop");
         let age_days = self.scorer.calculate_age_days(file);
 
         // Under Desktop, age > 14d
-        parent_lower.contains("/desktop/") && age_days > 14.0
+        in_desktop && age_days > 14.0
     }
 
     fn is_duplicate(&self, file: &File, context: &ScoringContext) -> bool {

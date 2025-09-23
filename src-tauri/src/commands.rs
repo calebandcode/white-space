@@ -317,37 +317,13 @@ fn validate_path(path: &str) -> Result<PathBuf, CommandError> {
         return Err(CommandError::Validation("Path traversal not allowed".to_string()));
     }
 
-    // For absolute paths, ensure they're within reasonable user directories
+    // Be permissive like scan validation: allow any existing directory, but block system roots
     if path_buf.is_absolute() {
-        let mut allowed_dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            allowed_dirs.push(home);
+        if !path_buf.exists() {
+            return Err(CommandError::NotFound(format!("Path does not exist: {}", path)));
         }
-        if let Some(desktop) = dirs::desktop_dir() {
-            allowed_dirs.push(desktop);
-        }
-        if let Some(downloads) = dirs::download_dir() {
-            allowed_dirs.push(downloads);
-        }
-        if let Some(pictures) = dirs::picture_dir() {
-            allowed_dirs.push(pictures);
-        }
-        if let Some(documents) = dirs::document_dir() {
-            allowed_dirs.push(documents);
-        }
-        if let Some(music) = dirs::audio_dir() {
-            allowed_dirs.push(music);
-        }
-        if let Some(videos) = dirs::video_dir() {
-            allowed_dirs.push(videos);
-        }
-
-        let normalized = canonicalize_or_clone(&path_buf);
-        let is_allowed = allowed_dirs.iter().any(|dir| normalized.starts_with(dir));
-        if !is_allowed {
-            return Err(CommandError::Permission(
-                "Path not in allowed directories".to_string(),
-            ));
+        if is_system_root(&path_buf) {
+            return Err(CommandError::Permission("Watching the system root is not supported".to_string()));
         }
     }
 
@@ -881,6 +857,7 @@ fn normalize_bucket_key(reason: &str) -> String {
         "screenshots" => "screenshot".to_string(),
         "big downloads" => "big_download".to_string(),
         "old desktop" => "old_desktop".to_string(),
+        "executable" | "executables" => "executable".to_string(),
         "duplicates" => "duplicate".to_string(),
         other => other.replace(' ', "_"),
     }
