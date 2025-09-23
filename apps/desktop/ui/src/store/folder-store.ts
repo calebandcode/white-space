@@ -211,11 +211,14 @@ interface FolderStoreState {
   loadPlatform: () => Promise<void>
   loadFolders: () => Promise<void>
   addFolder: () => Promise<void>
+  removeFolder: (id: string) => Promise<void>
   selectFolder: (id: string | null) => Promise<void>
   loadDir: (folderId: string, pathOverride?: string) => Promise<void>
   loadGauge: () => Promise<void>
   openInSystem: (path: string, reveal?: boolean) => Promise<void>
   startScan: (paths?: string[]) => Promise<void>
+  rescanAll: () => Promise<void>
+  rescanFolder: (path: string) => Promise<void>
   refreshScanStatus: () => Promise<void>
   loadCandidates: () => Promise<void>
   toggleCandidate: (fileId: number) => void
@@ -328,6 +331,19 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     }
   },
 
+  async removeFolder(id) {
+    try {
+      const numericId = Number(id)
+      if (!Number.isFinite(numericId) || numericId <= 0) return
+      await invokeCommand("remove_folder", { id: numericId })
+      await get().loadFolders()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to remove folder", error)
+      set({ folderError: message })
+    }
+  },
+
   async selectFolder(id) {
     if (!id) {
       set({ selectedFolderId: null, entries: [], entryError: null })
@@ -397,6 +413,33 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
           errorMessages: [...state.scan.errorMessages, message],
           lastError: message,
         },
+      }))
+    }
+  },
+
+  async rescanAll() {
+    try {
+      await invokeCommand("rescan_all", {})
+      await get().refreshScanStatus()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to rescan all", error)
+      set((state) => ({
+        scan: { ...state.scan, errorMessages: [...state.scan.errorMessages, message], lastError: message },
+      }))
+    }
+  },
+
+  async rescanFolder(path) {
+    if (!path) return
+    try {
+      await invokeCommand("rescan_folder", { path })
+      await get().refreshScanStatus()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to rescan folder", error)
+      set((state) => ({
+        scan: { ...state.scan, errorMessages: [...state.scan.errorMessages, message], lastError: message },
       }))
     }
   },

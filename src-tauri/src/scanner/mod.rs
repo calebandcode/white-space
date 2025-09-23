@@ -106,6 +106,7 @@ static SCAN_STATUS: Lazy<Mutex<ScanStatusInternal>> =
 pub const SCAN_PROGRESS_EVENT: &str = "scan://progress";
 pub const SCAN_DONE_EVENT: &str = "scan://done";
 pub const SCAN_ERROR_EVENT: &str = "scan://error";
+pub const SCAN_QUEUED_EVENT: &str = "scan://queued";
 
 pub fn start_scan<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -133,6 +134,8 @@ pub fn start_scan<R: tauri::Runtime>(
     }
 
     let app_handle = app.clone();
+    // Emit queued event so UI can reflect pending scan
+    emit_queued(&app_handle, roots.len());
     let pool_clone = pool.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -537,4 +540,14 @@ fn emit_done<R: tauri::Runtime>(app: &AppHandle<R>, payload: ScanFinishedPayload
 fn emit_error<R: tauri::Runtime>(app: &AppHandle<R>, message: String) {
     let payload = ScanErrorPayload { message };
     let _ = app.emit(SCAN_ERROR_EVENT, payload);
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanQueuedPayload {
+    pub roots: usize,
+}
+
+fn emit_queued<R: tauri::Runtime>(app: &AppHandle<R>, roots: usize) {
+    let payload = ScanQueuedPayload { roots };
+    let _ = app.emit(SCAN_QUEUED_EVENT, payload);
 }

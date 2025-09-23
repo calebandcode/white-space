@@ -59,7 +59,7 @@ export function Activity() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-6">
+    <div className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 w-2xl">
       <header className="space-y-1">
         <h1 className="text-xl font-semibold text-foreground">{selectedFolder.name}</h1>
         <p className="truncate text-sm text-muted-foreground">{selectedFolder.path}</p>

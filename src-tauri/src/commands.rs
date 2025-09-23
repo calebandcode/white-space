@@ -632,6 +632,32 @@ pub async fn list_folders(db: State<'_, DbPool>) -> Result<Vec<WatchedFolder>, S
 }
 
 #[tauri::command]
+pub async fn remove_folder(id: i64, db: State<'_, DbPool>) -> Result<(), String> {
+    if id <= 0 {
+        return Err("ERR_VALIDATION: Invalid folder id".to_string());
+    }
+
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let root = db_instance
+            .get_watched_root_by_id(id)
+            .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+        match root {
+            Some(r) => db_instance
+                .delete_watched_root(&r.path)
+                .map_err(|e| format!("ERR_DATABASE: {}", e)),
+            None => Err("ERR_NOT_FOUND: Watched folder not found".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_platform_info() -> PlatformInfo {
     #[cfg(target_os = "windows")]
     {
@@ -787,6 +813,55 @@ pub async fn start_scan(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn rescan_all(app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<(), String> {
+    let db_clone = db.inner().clone();
+    let roots = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        db_instance
+            .list_watched_paths()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    if roots.is_empty() {
+        return Err("ERR_VALIDATION: No scan roots configured".to_string());
+    }
+
+    scanner::start_scan(app, db.inner().clone(), roots).map_err(|e| format!("ERR_SCAN: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rescan_folder(path: String, app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("ERR_VALIDATION: Path cannot be empty".to_string());
+    }
+
+    let normalized = normalize_directory_path(Path::new(&path)).map_err(command_error_to_string)?;
+    let root = normalized.to_string_lossy().to_string();
+
+    // Ensure it's one of the watched roots
+    let db_clone = db.inner().clone();
+    let watched = tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        db_instance
+            .list_watched_paths()
+            .map_err(|e| format!("ERR_DATABASE: {}", e))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    if !watched.iter().any(|p| canonicalize_or_clone(Path::new(p)) == canonicalize_or_clone(Path::new(&root))) {
+        return Err("ERR_PERMISSION: Path is not a watched root".to_string());
+    }
+
+    scanner::start_scan(app, db.inner().clone(), vec![root]).map_err(|e| format!("ERR_SCAN: {e}"))?;
+    Ok(())
+}
 #[tauri::command]
 pub fn scan_status() -> Result<scanner::ScanStatusPayload, String> {
     Ok(scanner::current_status())

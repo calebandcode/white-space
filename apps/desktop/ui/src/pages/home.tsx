@@ -45,6 +45,7 @@ export function Home() {
   const loadFolders = useFolderStore((state) => state.loadFolders)
   const loadGauge = useFolderStore((state) => state.loadGauge)
   const addFolder = useFolderStore((state) => state.addFolder)
+  const removeFolder = useFolderStore((state) => state.removeFolder)
   const selectFolder = useFolderStore((state) => state.selectFolder)
   const openInSystem = useFolderStore((state) => state.openInSystem)
 
@@ -131,6 +132,7 @@ export function Home() {
           onSelect={(id, multi) => void handleSelectFolder(id, multi)}
           onOpen={handleOpenFolder}
           onReveal={handleRevealFolder}
+          onRemove={(id) => void removeFolder(id)}
           openLabel={openLabel}
           revealLabel={revealLabel}
         />
