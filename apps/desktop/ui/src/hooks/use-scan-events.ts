@@ -27,6 +27,9 @@ export function useScanEvents() {
   const handleDone = useFolderStore((state) => state.handleScanDone)
   const handleError = useFolderStore((state) => state.handleScanError)
   const refreshStatus = useFolderStore((state) => state.refreshScanStatus)
+  const loadCandidates = useFolderStore((state) => state.loadCandidates)
+  const loadDir = useFolderStore((state) => state.loadDir)
+  const selectedFolderId = useFolderStore((state) => state.selectedFolderId)
   const scanStatus = useFolderStore((state) => state.scan.status)
 
   useEffect(() => {
@@ -92,4 +95,39 @@ export function useScanEvents() {
 
     return () => clearInterval(interval)
   }, [scanStatus, refreshStatus])
+
+  // Fallback: periodic refresh when capabilities block event.listen
+  useEffect(() => {
+    let cancelled = false
+
+    const tick = async () => {
+      try {
+        await refreshStatus()
+        const folderId = useFolderStore.getState().selectedFolderId
+        if (folderId) {
+          await loadDir(folderId)
+          await loadCandidates()
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible" && !cancelled) {
+        void tick()
+      }
+    }, 5000)
+
+    const onFocus = () => { void tick() }
+    window.addEventListener("focus", onFocus)
+    document.addEventListener("visibilitychange", onFocus)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+      window.removeEventListener("focus", onFocus)
+      document.removeEventListener("visibilitychange", onFocus)
+    }
+  }, [loadCandidates, loadDir, refreshStatus])
 }

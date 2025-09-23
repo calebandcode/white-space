@@ -324,6 +324,8 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         }
       })
       await get().loadDir(mapped.id)
+      // Kick a focused scan on the newly added root so candidates populate
+      await get().startScan([mapped.path])
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to add folder", error)
