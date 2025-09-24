@@ -189,7 +189,7 @@ use crate::db::Database;
 
 let db = Database::open_db("database.db")?;
 let selector = FileSelector::new();
-let candidates = selector.daily_candidates(10, &db)?;
+let candidates = selector.daily_candidates(Some(10), &db)?;
 
 for candidate in candidates {
     println!("File: {}, Score: {:.2}, Reason: {}",

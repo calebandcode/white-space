@@ -51,7 +51,7 @@ impl FileSelector {
 
     pub fn daily_candidates(
         &self,
-        max_total: usize,
+        max_total: Option<usize>,
         db: &Database,
     ) -> Result<Vec<Candidate>, Box<dyn std::error::Error>> {
         // Get all files from database
@@ -163,8 +163,7 @@ impl FileSelector {
         let age_days = self.scorer.calculate_age_days(file);
 
         // Under Downloads, size > 100MB, unopened OR age > 30d
-        in_downloads && size_mb > 100.0
-            && (file.last_opened_at.is_none() || age_days > 30.0)
+        in_downloads && size_mb > 100.0 && (file.last_opened_at.is_none() || age_days > 30.0)
     }
 
     fn is_old_desktop(&self, file: &File) -> bool {
@@ -246,7 +245,7 @@ impl FileSelector {
         &self,
         buckets: &FileBucket,
         context: &ScoringContext,
-        max_total: usize,
+        max_total: Option<usize>,
     ) -> Vec<Candidate> {
         let mut candidates = Vec::new();
 
@@ -282,7 +281,8 @@ impl FileSelector {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        candidates.truncate(max_total.min(self.config.daily_total_max));
+        let total_cap = max_total.unwrap_or(self.config.daily_total_max);
+        candidates.truncate(total_cap);
 
         candidates
     }

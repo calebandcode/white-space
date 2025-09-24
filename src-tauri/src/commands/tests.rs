@@ -171,6 +171,55 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_candidates_by_root_path_keeps_matching_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let root_dir = temp_dir.path().join("root");
+        let nested = root_dir.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+
+        let matching_path = nested.join("Screenshot 2024-01-01.png");
+        fs::write(&matching_path, b"content").unwrap();
+
+        let outside_dir = temp_dir.path().join("outside");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_path = outside_dir.join("Screenshot 2023-01-01.png");
+        fs::write(&outside_path, b"content").unwrap();
+
+        let mut candidates = vec![
+            Candidate {
+                file_id: 1,
+                path: matching_path.to_string_lossy().to_string(),
+                parent_dir: nested.to_string_lossy().to_string(),
+                size_bytes: 1024,
+                reason: "Screenshots".to_string(),
+                score: 0.9,
+                confidence: 0.9,
+                preview_hint: "".to_string(),
+                age_days: 10.0,
+            },
+            Candidate {
+                file_id: 2,
+                path: outside_path.to_string_lossy().to_string(),
+                parent_dir: outside_dir.to_string_lossy().to_string(),
+                size_bytes: 1024,
+                reason: "Screenshots".to_string(),
+                score: 0.8,
+                confidence: 0.8,
+                preview_hint: "".to_string(),
+                age_days: 20.0,
+            },
+        ];
+
+        let mut errors = Vec::new();
+        let root_str = root_dir.to_string_lossy().to_string();
+        filter_candidates_by_root_path(&mut candidates, &root_str, &mut errors);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, matching_path.to_string_lossy());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
     fn test_archive_files_empty() {
         let (temp_dir, db) = setup_test_db();
         let app_state = AppState { db };
@@ -596,7 +645,3 @@ impl Default for PartialUserPrefs {
         }
     }
 }
-
-
-
-

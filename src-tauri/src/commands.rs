@@ -864,6 +864,36 @@ fn normalize_bucket_key(reason: &str) -> String {
 }
 
 
+pub(crate) fn filter_candidates_by_root_path(
+    candidates: &mut Vec<Candidate>,
+    root_path: &str,
+    errors: &mut Vec<String>,
+) {
+    let root_path_buf = PathBuf::from(root_path);
+    let root_path = if let Ok(canonical) = root_path_buf.canonicalize() {
+        canonical
+    } else {
+        errors.push(format!(
+            "Warning: Could not canonicalize path: {}",
+            root_path_buf.display()
+        ));
+        root_path_buf
+    };
+
+    let root_path_str = root_path.to_string_lossy().to_string();
+
+    candidates.retain(|candidate| {
+        let candidate_path = Path::new(&candidate.path);
+        if let Ok(canon_candidate) = candidate_path.canonicalize() {
+            let canon_str = canon_candidate.to_string_lossy().to_string();
+            canon_str.starts_with(&root_path_str)
+        } else {
+            candidate.path.starts_with(&root_path_str)
+        }
+    });
+}
+
+
 #[tauri::command]
 pub async fn get_candidates_bucketed(
     params: Option<GetCandidatesBucketedParams>,
@@ -893,7 +923,7 @@ pub async fn get_candidates_bucketed(
         let selector = FileSelector::new();
         let db_instance = Database::new(conn);
         let mut items = selector
-            .daily_candidates(fetch_size, &db_instance)
+            .daily_candidates(Some(fetch_size), &db_instance)
             .map_err(|e| format!("ERR_SELECTOR: {}", e))?;
         Ok::<(Vec<Candidate>, Vec<String>), String>((items.drain(..).collect(), Vec::new()))
     })
@@ -902,30 +932,7 @@ pub async fn get_candidates_bucketed(
 
     // Filter by root path if provided
     if let Some(root_path) = params.root_path.as_deref() {
-        // Normalize the root path to ensure consistent path separators
-        let root_path = PathBuf::from(root_path);
-        let root_path = if let Ok(canonical) = root_path.canonicalize() {
-            canonical
-        } else {
-            // If we can't canonicalize, use the path as-is but log a warning
-            errors.push(format!("Warning: Could not canonicalize path: {}", root_path.display()));
-            root_path
-        };
-        
-        // Convert to string for path comparison
-        let root_path_str = root_path.to_string_lossy().to_string();
-        
-        // Filter candidates to only include those under the root path
-        candidates.retain(|candidate| {
-            let candidate_path = Path::new(&candidate.path);
-            if let Ok(canon_candidate) = candidate_path.canonicalize() {
-                let canon_str = canon_candidate.to_string_lossy().to_string();
-                canon_str.starts_with(&root_path_str)
-            } else {
-                // Fallback to string comparison if canonicalization fails
-                candidate.path.starts_with(&root_path_str)
-            }
-        });
+        filter_candidates_by_root_path(&mut candidates, root_path, &mut errors);
     }
 
     // Filter by requested buckets if provided
@@ -1131,7 +1138,7 @@ pub async fn daily_candidates(
         let selector = FileSelector::new();
         let db_instance = Database::new(conn);
         selector
-            .daily_candidates(max_total, &db_instance)
+            .daily_candidates(Some(max_total), &db_instance)
             .map_err(|e| format!("ERR_SELECTOR: {}", e))
     })
     .await
