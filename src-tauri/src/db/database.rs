@@ -249,7 +249,7 @@ impl Database {
     pub fn get_all_active_files(&self) -> SqliteResult<Vec<File>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM files WHERE is_deleted = 0")?;
+            .prepare("SELECT * FROM files WHERE is_deleted = 0 ORDER BY last_seen_at DESC")?;
         let rows = stmt.query_map([], |row| Self::map_row_to_file(row))?;
         let mut files = Vec::new();
         for row in rows {

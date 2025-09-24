@@ -2,9 +2,7 @@
 mod tests {
     use super::*;
     use super::scoring::*;
-    use crate::db::Database;
-    use chrono::{Utc, Duration};
-    use std::collections::HashSet;
+    use chrono::{DateTime, Duration, Utc};
 
     fn create_test_file(id: i64, path: String, size_bytes: i64, age_days: i64) -> File {
         let now = Utc::now();
@@ -17,7 +15,10 @@ mod tests {
             mime: Some("text/plain".to_string()),
             size_bytes,
             created_at: file_time,
+            modified_at: None,
+            accessed_at: None,
             last_opened_at: None,
+            partial_sha1: None,
             sha1: Some("test_hash".to_string()),
             first_seen_at: file_time,
             last_seen_at: file_time,
@@ -372,11 +373,57 @@ mod tests {
             old_desktop: vec![create_test_file(6, "/test/old.txt".to_string(), 1024, 20)],
             duplicates: vec![create_test_file(7, "/test/duplicate.txt".to_string(), 1024, 30)],
         };
-        
+
         let candidates = selector.select_candidates(&buckets, &context, 10);
-        
+
         // Should respect daily_total_max limit
         assert!(candidates.len() <= 3);
+    }
+
+    #[test]
+    fn test_bucket_scoring_truncates_after_sorting() {
+        let selector = FileSelector::new();
+        let context = ScoringContext::new();
+
+        let files = vec![
+            create_test_file(1, "/test/small_recent.txt".to_string(), 1 * 1024, 1),
+            create_test_file(2, "/test/small_mid.txt".to_string(), 2 * 1024, 5),
+            create_test_file(3, "/test/medium.txt".to_string(), 5 * 1024, 10),
+            create_test_file(4, "/test/big_old.zip".to_string(), 500 * 1024 * 1024, 60),
+            create_test_file(5, "/test/big_older.zip".to_string(), 700 * 1024 * 1024, 120),
+        ];
+
+        let max_count = 3;
+        let candidates = selector.select_from_bucket(&files, &context, max_count, "Test");
+        assert_eq!(candidates.len(), max_count);
+
+        let candidate_ids: Vec<i64> = candidates.iter().map(|c| c.file_id).collect();
+
+        let scoring = FileScorer::new();
+        let mut expected: Vec<(i64, f64, DateTime<Utc>)> = files
+            .iter()
+            .map(|file| {
+                let factors = scoring.extract_score_factors(file, &context);
+                let score = scoring.calculate_score(file, &factors);
+                (file.id.unwrap(), score, file.last_seen_at)
+            })
+            .collect();
+        expected.sort_by(|a, b| {
+            b.1
+                .partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        let expected_ids: Vec<i64> = expected
+            .into_iter()
+            .take(max_count)
+            .map(|(id, _, _)| id)
+            .collect();
+
+        assert_eq!(candidate_ids, expected_ids);
+        assert!(candidate_ids.contains(&4));
+        assert!(candidate_ids.contains(&5));
+        assert!(!candidate_ids.contains(&1));
     }
 
     // Helper functions for tests
@@ -394,7 +441,10 @@ mod tests {
             mime: Some("text/plain".to_string()),
             size_bytes,
             created_at: last_seen,
+            modified_at: None,
+            accessed_at: None,
             last_opened_at: None,
+            partial_sha1: None,
             sha1: Some("test_hash".to_string()),
             first_seen_at: last_seen,
             last_seen_at,
