@@ -294,28 +294,43 @@ impl FileSelector {
         max_count: usize,
         reason: &str,
     ) -> Vec<Candidate> {
-        let mut bucket_candidates = Vec::new();
+        let mut scored_candidates: Vec<(Candidate, DateTime<Utc>)> = files
+            .iter()
+            .map(|file| {
+                let factors = self.scorer.extract_score_factors(file, context);
+                let score = self.scorer.calculate_score(file, &factors);
+                let confidence = self.scorer.calculate_confidence(file, &factors);
+                let preview_hint = self.scorer.generate_preview_hint(file, &factors);
 
-        for file in files.iter().take(max_count) {
-            let factors = self.scorer.extract_score_factors(file, context);
-            let score = self.scorer.calculate_score(file, &factors);
-            let confidence = self.scorer.calculate_confidence(file, &factors);
-            let preview_hint = self.scorer.generate_preview_hint(file, &factors);
+                (
+                    Candidate {
+                        file_id: file.id.unwrap_or(0),
+                        path: file.path.clone(),
+                        parent_dir: file.parent_dir.clone(),
+                        size_bytes: file.size_bytes as u64,
+                        reason: reason.to_string(),
+                        score,
+                        confidence,
+                        preview_hint,
+                        age_days: factors.age_days,
+                    },
+                    file.last_seen_at,
+                )
+            })
+            .collect();
 
-            bucket_candidates.push(Candidate {
-                file_id: file.id.unwrap_or(0),
-                path: file.path.clone(),
-                parent_dir: file.parent_dir.clone(),
-                size_bytes: file.size_bytes as u64,
-                reason: reason.to_string(),
-                score,
-                confidence,
-                preview_hint,
-                age_days: factors.age_days,
-            });
-        }
+        scored_candidates.sort_by(|a, b| {
+            b.0.score
+                .partial_cmp(&a.0.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.cmp(&a.1))
+        });
+        scored_candidates.truncate(max_count);
 
-        bucket_candidates
+        scored_candidates
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect()
     }
 
     pub fn get_bucket_stats(
