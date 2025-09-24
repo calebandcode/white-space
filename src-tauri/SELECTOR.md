@@ -61,31 +61,31 @@ score = 0.45*norm(size) + 0.25*norm(age_days)
 #### Screenshots
 
 - **Criteria**: Name contains "screenshot" OR under `/Screenshots/`
-- **Cap**: 5 files per day
+- **Cap**: 30 files per day
 - **Rationale**: Screenshots are often temporary and accumulate quickly
 
 #### Big Downloads
 
 - **Criteria**: Under Downloads, size > 100MB, unopened OR age > 30d
-- **Cap**: 3 files per day
+- **Cap**: 30 files per day
 - **Rationale**: Large downloads consume significant space
 
 #### Old Desktop
 
 - **Criteria**: Under Desktop, age > 14d
-- **Cap**: 2 files per day
+- **Cap**: 30 files per day
 - **Rationale**: Desktop files are often temporary
 
 #### Duplicates
 
 - **Criteria**: Identical SHA1 hash (skip files > 2GB)
-- **Cap**: 2 files per day
+- **Cap**: 30 files per day
 - **Rationale**: Duplicates waste space unnecessarily
 
 ### Daily Limits
 
 - **Per Bucket**: Individual caps for each bucket type
-- **Total Daily**: Maximum 12 candidates per day (mix cap)
+- **Total Daily**: Maximum 30 candidates per day (mix cap)
 - **Configurable**: Limits can be adjusted via `BucketConfig`
 
 ## API Reference
@@ -162,11 +162,11 @@ Preview hints provide quick context about why a file was selected:
 
 ```rust
 struct BucketConfig {
-    screenshots_max: usize,    // Default: 5
-    big_downloads_max: usize,  // Default: 3
-    old_desktop_max: usize,    // Default: 2
-    duplicates_max: usize,     // Default: 2
-    daily_total_max: usize,    // Default: 12
+    screenshots_max: usize,    // Default: 30
+    big_downloads_max: usize,  // Default: 30
+    old_desktop_max: usize,    // Default: 30
+    duplicates_max: usize,     // Default: 30
+    daily_total_max: usize,    // Default: 30
 }
 ```
 

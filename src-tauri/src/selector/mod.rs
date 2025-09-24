@@ -19,11 +19,11 @@ pub struct BucketConfig {
 impl Default for BucketConfig {
     fn default() -> Self {
         Self {
-            screenshots_max: 5,
-            big_downloads_max: 3,
-            old_desktop_max: 2,
-            duplicates_max: 2,
-            daily_total_max: 12, // Mix cap per day
+            screenshots_max: 30,
+            big_downloads_max: 30,
+            old_desktop_max: 30,
+            duplicates_max: 30,
+            daily_total_max: 30, // Mix cap per day
         }
     }
 }
