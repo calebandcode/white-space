@@ -327,7 +327,7 @@ mod tests {
             duplicates: vec![create_test_file(4, "/test/duplicate.txt".to_string(), 1024, 30)],
         };
         
-        let candidates = selector.select_candidates(&buckets, &context, 10);
+        let candidates = selector.select_candidates(&buckets, &context, Some(10));
         
         // Should have candidates from all buckets
         assert!(!candidates.is_empty());
@@ -355,9 +355,9 @@ mod tests {
             duplicates_max: 1,
             daily_total_max: 3,
         };
-        
+
         selector.update_config(config);
-        
+
         // Test that limits are respected
         let context = create_test_context();
         let buckets = FileBucket {
@@ -374,10 +374,45 @@ mod tests {
             duplicates: vec![create_test_file(7, "/test/duplicate.txt".to_string(), 1024, 30)],
         };
 
-        let candidates = selector.select_candidates(&buckets, &context, 10);
+        let candidates = selector.select_candidates(&buckets, &context, None);
 
         // Should respect daily_total_max limit
         assert!(candidates.len() <= 3);
+    }
+
+    #[test]
+    fn test_explicit_limit_overrides_daily_cap() {
+        let mut selector = FileSelector::new();
+        let config = BucketConfig {
+            screenshots_max: 20,
+            big_downloads_max: 0,
+            old_desktop_max: 0,
+            duplicates_max: 0,
+            daily_total_max: 3,
+        };
+
+        selector.update_config(config);
+
+        let context = create_test_context();
+        let mut screenshots = Vec::new();
+        for i in 0..10 {
+            screenshots.push(create_test_file(
+                100 + i,
+                format!("/test/screenshot_{}.png", i),
+                1024,
+                30,
+            ));
+        }
+
+        let buckets = FileBucket {
+            screenshots,
+            big_downloads: Vec::new(),
+            old_desktop: Vec::new(),
+            duplicates: Vec::new(),
+        };
+
+        let candidates = selector.select_candidates(&buckets, &context, Some(8));
+        assert_eq!(candidates.len(), 8);
     }
 
     #[test]

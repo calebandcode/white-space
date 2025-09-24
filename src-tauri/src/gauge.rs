@@ -116,7 +116,7 @@ impl GaugeManager {
 
     fn compute_potential_today(&self, db: &Database) -> OpsResult<u64> {
         // Get current daily candidates
-        let candidates = self.selector.daily_candidates(1000, db)?; // Large limit to get all
+        let candidates = self.selector.daily_candidates(Some(1000), db)?; // Large limit to get all
 
         let total_bytes: u64 = candidates
             .iter()
@@ -174,11 +174,8 @@ impl GaugeManager {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> OpsResult<Vec<File>> {
-        db.get_files_archived_in_period(
-            &window_start.to_rfc3339(),
-            &window_end.to_rfc3339(),
-        )
-        .map_err(|e| OpsError::GaugeError(format!("Failed to get archived files: {}", e)))
+        db.get_files_archived_in_period(&window_start.to_rfc3339(), &window_end.to_rfc3339())
+            .map_err(|e| OpsError::GaugeError(format!("Failed to get archived files: {}", e)))
     }
 
     fn get_delete_actions_in_window(
@@ -187,11 +184,8 @@ impl GaugeManager {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> OpsResult<Vec<crate::models::Action>> {
-        db.get_files_deleted_in_period(
-            &window_start.to_rfc3339(),
-            &window_end.to_rfc3339(),
-        )
-        .map_err(|e| OpsError::GaugeError(format!("Failed to get delete actions: {}", e)))
+        db.get_files_deleted_in_period(&window_start.to_rfc3339(), &window_end.to_rfc3339())
+            .map_err(|e| OpsError::GaugeError(format!("Failed to get delete actions: {}", e)))
     }
 
     fn has_delete_action_after_archive(
