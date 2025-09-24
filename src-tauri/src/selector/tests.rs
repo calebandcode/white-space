@@ -381,6 +381,16 @@ mod tests {
     }
 
     #[test]
+    fn test_bucket_config_default_limits() {
+        let config = BucketConfig::default();
+        assert_eq!(config.screenshots_max, 30);
+        assert_eq!(config.big_downloads_max, 30);
+        assert_eq!(config.old_desktop_max, 30);
+        assert_eq!(config.duplicates_max, 30);
+        assert_eq!(config.daily_total_max, 30);
+    }
+
+    #[test]
     fn test_explicit_limit_overrides_daily_cap() {
         let mut selector = FileSelector::new();
         let config = BucketConfig {
