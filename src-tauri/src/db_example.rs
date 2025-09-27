@@ -30,6 +30,8 @@ pub fn example_usage() -> Result<(), Box<dyn std::error::Error>> {
         batch_id: Some("batch_001".to_string()),
         src_path: Some("/home/user/document.pdf".to_string()),
         dst_path: Some("/archive/document.pdf".to_string()),
+        origin: None,
+        note: None,
     };
     let action_id = db.insert_action(new_action)?;
     println!("Inserted action with ID: {}", action_id);

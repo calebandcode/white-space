@@ -35,9 +35,11 @@ mod tests {
         let new_action = NewAction {
             file_id,
             action,
-            batch_id: "test_batch".to_string(),
-            src_path: "/test/src".to_string(),
-            dst_path: "/test/dst".to_string(),
+            batch_id: Some("test_batch".to_string()),
+            src_path: Some("/test/src".to_string()),
+            dst_path: Some("/test/dst".to_string()),
+            origin: None,
+            note: None,
         };
         db.insert_action(new_action).unwrap()
     }
@@ -574,12 +576,17 @@ mod tests {
     #[test]
     fn test_staged_file_serialization() {
         let staged_file = StagedFile {
+            record_id: 1,
             file_id: 1,
             path: "/test/path".to_string(),
-            size_bytes: 1024,
-            archived_at: chrono::Utc::now(),
-            age_days: 7,
             parent_dir: "/test".to_string(),
+            size_bytes: 1024,
+            status: "staged".to_string(),
+            staged_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+            batch_id: Some("batch".to_string()),
+            note: None,
+            cooloff_until: None,
         };
 
         let json = serde_json::to_string(&staged_file).unwrap();

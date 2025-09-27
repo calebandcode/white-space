@@ -1,58 +1,73 @@
-import * as React from 'react'
+﻿import * as React from "react"
 
-import { clamp, formatBytes, segmentRatios, GB } from '@/hooks/useGauge'
+import { formatBytes } from "@/hooks/useGauge"
 
 export interface GaugeBarProps {
   potentialBytes: number
   stagedBytes: number
   freedBytes: number
-  maxCapacity?: number
+  windowStart?: string | null
+  windowEnd?: string | null
 }
 
 export default function GaugeBar({
   potentialBytes,
   stagedBytes,
   freedBytes,
-  maxCapacity = 4 * GB,
+  windowStart,
+  windowEnd,
 }: GaugeBarProps) {
-  const { freedRatio, stagedRatio, potentialRatio } = React.useMemo(() => {
-    return segmentRatios({
-      potentialBytes,
-      stagedBytes,
-      freedBytes,
-      maxCapacity,
-    })
-  }, [freedBytes, maxCapacity, potentialBytes, stagedBytes])
-
-  const freedWidth = `${clamp(freedRatio) * 100}%`
-  const stagedWidth = `${clamp(Math.max(stagedRatio, freedRatio)) * 100}%`
-  const stagedOffset = `${clamp(freedRatio) * 100}%`
-  const potentialWidth = `${clamp(potentialRatio) * 100}%`
-
-  const label = React.useMemo(() => {
-    const target = formatBytes(maxCapacity)
-    return [
-      `Potential: ${formatBytes(potentialBytes)}`,
-      `Staged: ${formatBytes(stagedBytes)}`,
-      `Freed: ${formatBytes(freedBytes)}`,
-      `Target: ${target}`
-    ].join(', ')
-  }, [freedBytes, maxCapacity, potentialBytes, stagedBytes])
+  const windowLabel = React.useMemo(() => formatWindowRange(windowStart, windowEnd), [windowEnd, windowStart])
 
   return (
-    <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-muted" aria-label={label}>
-      <div
-        className="absolute left-0 top-0 h-full rounded-full bg-emerald-500/80 transition-all duration-500 ease-out"
-        style={{ width: freedWidth }}
-      />
-      <div
-        className="absolute top-0 h-full rounded-full bg-amber-400/80 transition-all duration-500 ease-out"
-        style={{ left: stagedOffset, width: `calc(${stagedWidth} - ${stagedOffset})` }}
-      />
-      <div
-        className="absolute left-0 top-0 h-full rounded-full opacity-70 transition-all duration-500 ease-out"
-        style={{ width: potentialWidth, backgroundImage: 'repeating-linear-gradient(90deg, rgba(59,130,246,0.35) 0, rgba(59,130,246,0.35) 6px, transparent 6px, transparent 12px)' }}
-      />
+    <div className="grid gap-3 rounded-lg border border-border/60 bg-muted/20 p-3 text-sm text-foreground">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground uppercase tracking-wide">
+        <span>Rolling Window</span>
+        <span>{windowLabel}</span>
+      </div>
+      <StatRow label="Potential today" value={formatBytes(potentialBytes)} />
+      <StatRow label="Staged this window" value={formatBytes(stagedBytes)} />
+      <StatRow label="Freed this window" value={formatBytes(freedBytes)} />
     </div>
   )
+}
+
+function StatRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground">{value}</span>
+    </div>
+  )
+}
+
+function formatWindowRange(windowStart?: string | null, windowEnd?: string | null): string {
+  if (!windowStart || !windowEnd) return "Window unavailable"
+  try {
+    const start = new Date(windowStart)
+    const end = new Date(windowEnd)
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) {
+      return "Window unavailable"
+    }
+
+    const sameYear = start.getFullYear() === end.getFullYear()
+    const startFormatter = new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: sameYear ? undefined : "numeric",
+    })
+    const endFormatter = new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    })
+
+    const startLabel = startFormatter.format(start)
+    const endLabel = endFormatter.format(end)
+
+    return `${startLabel} – ${endLabel}`
+  } catch (error) {
+    console.warn("Failed to format gauge window", error)
+    return "Window unavailable"
+  }
 }

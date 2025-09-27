@@ -11,11 +11,9 @@ export interface FolderItemProps {
   selected?: boolean
   onSelect?: (id: string, multi?: boolean) => void
   onOpen?: (id: string) => void
-  onReveal?: (id: string) => void
   onRename?: (id: string, name: string) => void
   onRemove?: (id: string) => void
   openLabel?: string
-  revealLabel?: string
 }
 
 export function FolderItem({
@@ -23,11 +21,9 @@ export function FolderItem({
   selected,
   onSelect,
   onOpen,
-  onReveal,
   onRename,
   onRemove,
   openLabel,
-  revealLabel,
 }: FolderItemProps) {
   const [isRenaming, setIsRenaming] = React.useState(false)
   const itemRef = React.useRef<HTMLDivElement>(null)
@@ -208,9 +204,7 @@ export function FolderItem({
       folder={folder}
       disabled={disabled}
       openLabel={openLabel}
-      revealLabel={revealLabel}
       onOpen={onOpen}
-      onReveal={onReveal}
       onRename={() => beginRename()}
       onRemove={onRemove}
       onSelect={(id, multi) => {

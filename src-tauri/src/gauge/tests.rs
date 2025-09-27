@@ -35,6 +35,8 @@ mod tests {
             batch_id: Some("test_batch".to_string()),
             src_path: Some("/test/source.txt".to_string()),
             dst_path: Some("/test/destination.txt".to_string()),
+            origin: None,
+            note: None,
         };
         
         db.insert_action(action).unwrap()

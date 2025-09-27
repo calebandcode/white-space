@@ -334,10 +334,15 @@ impl ArchiveManager {
             batch_id: Some(batch_id.to_string()),
             src_path: Some(src_path.to_string()),
             dst_path: Some(dst_path.to_string()),
+            origin: Some("archive_manager".to_string()),
+            note: None,
         };
 
         db.insert_action(&action)
             .map_err(|e| OpsError::ArchiveError(format!("Failed to log action: {}", e)))?;
+        db.update_file_location(file_id, dst_path).map_err(|e| {
+            OpsError::ArchiveError(format!("Failed to update file location: {}", e))
+        })?;
 
         Ok(())
     }

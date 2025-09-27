@@ -1,5 +1,6 @@
 pub mod active_project;
 pub mod file_walker;
+pub mod watcher;
 mod hash;
 
 use self::active_project::{ActiveProjectDetector, DevRepo};
@@ -10,9 +11,9 @@ use crate::models::{NewFile, NewMetric};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
@@ -20,6 +21,39 @@ use walkdir::WalkDir;
 const PROGRESS_EMIT_INTERVAL: u64 = 250;
 const PARTIAL_SAMPLE_SIZE: usize = 256 * 1024; // 256KB
 const SMALL_FILE_THRESHOLD: u64 = 4 * 1024 * 1024; // 4MB
+
+fn sanitize_string(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        sanitized.push(ch);
+        if sanitized.len() >= 1024 {
+            break;
+        }
+    }
+    sanitized
+}
+
+fn validate_scan_path(path: &str) -> anyhow::Result<()> {
+    let path_buf = PathBuf::from(path);
+    if path_buf
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("Path traversal not allowed");
+    }
+    if path_buf.is_absolute() {
+        if !path_buf.exists() {
+            anyhow::bail!("Path does not exist");
+        }
+        if path_buf.parent().is_none() {
+            anyhow::bail!("Cannot scan system root");
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanResult {
@@ -103,6 +137,114 @@ impl Default for ScanStatusInternal {
 static SCAN_STATUS: Lazy<Mutex<ScanStatusInternal>> =
     Lazy::new(|| Mutex::new(ScanStatusInternal::default()));
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanTrigger {
+    Manual,
+    Watcher,
+}
+
+impl ScanTrigger {
+    fn emit_queued(self) -> bool {
+        true
+    }
+}
+
+#[derive(Clone)]
+struct ScanJob {
+    roots: Vec<String>,
+    trigger: ScanTrigger,
+}
+
+static SCAN_QUEUE: Lazy<Mutex<VecDeque<ScanJob>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+
+fn enqueue_scan_job<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pool: &DbPool,
+    roots: Vec<String>,
+    trigger: ScanTrigger,
+) -> anyhow::Result<()> {
+    if roots.is_empty() {
+        anyhow::bail!("no scan roots provided");
+    }
+
+    {
+        let mut queue = SCAN_QUEUE.lock().expect("scan queue lock");
+        if queue.iter().any(|job| job.roots == roots) {
+            return Ok(());
+        }
+        queue.push_back(ScanJob { roots, trigger });
+    }
+
+    process_queue(app, pool);
+    Ok(())
+}
+
+fn process_queue<R: tauri::Runtime>(app: &AppHandle<R>, pool: &DbPool) {
+    let job_opt = {
+        let mut queue = SCAN_QUEUE.lock().expect("scan queue lock");
+        let mut status = SCAN_STATUS.lock().expect("scan status lock");
+        if status.state == ScanState::Running {
+            None
+        } else {
+            queue.pop_front().map(|job| {
+                status.state = ScanState::Running;
+                status.scanned = 0;
+                status.skipped = 0;
+                status.errors = 0;
+                status.started_at = Some(Utc::now());
+                status.finished_at = None;
+                status.roots = job.roots.len();
+                status.current_path = None;
+                status.last_error = None;
+                job
+            })
+        }
+    };
+
+    if let Some(job) = job_opt {
+        if job.trigger.emit_queued() {
+            emit_queued(app, job.roots.len());
+        }
+
+        let app_handle = app.clone();
+        let pool_clone = pool.clone();
+        let roots = job.roots.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = (|| {
+                let conn = pool_clone
+                    .get()
+                    .map_err(|e| anyhow::anyhow!("db pool: {e}"))?;
+                let db = Database::new(conn);
+                let mut scanner = Scanner::new();
+                scanner.run_scan(&app_handle, roots.clone(), &db)
+            })();
+
+            match result {
+                Ok(summary) => finalize_status(
+                    summary.counted,
+                    summary.skipped,
+                    summary.errors.len() as u64,
+                ),
+                Err(err) => {
+                    let message = err.to_string();
+                    finalize_status_error(message.clone());
+                    emit_error(&app_handle, message);
+                }
+            }
+
+            process_queue(&app_handle, &pool_clone);
+        });
+    }
+}
+
+pub(crate) fn queue_scan_from_watcher<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pool: &DbPool,
+    roots: Vec<String>,
+) -> anyhow::Result<()> {
+    enqueue_scan_job(app, pool, roots, ScanTrigger::Watcher)
+}
+
 pub const SCAN_PROGRESS_EVENT: &str = "scan://progress";
 pub const SCAN_DONE_EVENT: &str = "scan://done";
 pub const SCAN_ERROR_EVENT: &str = "scan://error";
@@ -117,54 +259,21 @@ pub fn start_scan<R: tauri::Runtime>(
         anyhow::bail!("no scan roots provided");
     }
 
-    {
-        let mut status = SCAN_STATUS.lock().expect("scan status lock");
-        if status.state == ScanState::Running {
-            anyhow::bail!("scan already in progress");
+    let mut unique = HashSet::new();
+    let mut sanitized = Vec::new();
+    for root in roots {
+        validate_scan_path(&root).map_err(|e| anyhow::anyhow!("ERR_VALIDATION: {e}"))?;
+        if !Path::new(&root).is_dir() {
+            anyhow::bail!("ERR_VALIDATION: Path is not a directory: {root}");
         }
-        status.state = ScanState::Running;
-        status.scanned = 0;
-        status.skipped = 0;
-        status.errors = 0;
-        status.started_at = Some(Utc::now());
-        status.finished_at = None;
-        status.roots = roots.len();
-        status.current_path = None;
-        status.last_error = None;
+        let clean = sanitize_string(&root);
+        if unique.insert(clean.clone()) {
+            sanitized.push(clean);
+        }
     }
 
-    let app_handle = app.clone();
-    // Emit queued event so UI can reflect pending scan
-    emit_queued(&app_handle, roots.len());
-    let pool_clone = pool.clone();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = (|| {
-            let conn = pool_clone
-                .get()
-                .map_err(|e| anyhow::anyhow!("db pool: {e}"))?;
-            let db = Database::new(conn);
-            let mut scanner = Scanner::new();
-            scanner.run_scan(&app_handle, roots, &db)
-        })();
-
-        match result {
-            Ok(summary) => finalize_status(
-                summary.counted,
-                summary.skipped,
-                summary.errors.len() as u64,
-            ),
-            Err(err) => {
-                let message = err.to_string();
-                finalize_status_error(message.clone());
-                emit_error(&app_handle, message);
-            }
-        }
-    });
-
-    Ok(())
+    enqueue_scan_job(&app, &pool, sanitized, ScanTrigger::Manual)
 }
-
 
 pub fn current_status() -> ScanStatusPayload {
     let status = SCAN_STATUS.lock().expect("scan status lock");
@@ -259,6 +368,7 @@ impl Scanner {
                 continue;
             }
 
+            let mut root_seen: HashSet<String> = HashSet::new();
             let mut entries = WalkDir::new(root_path).follow_links(false).into_iter();
             while let Some(entry) = entries.next() {
                 match entry {
@@ -284,7 +394,8 @@ impl Scanner {
                         }
 
                         match self.process_file(path, db, &mut hash_candidates) {
-                            Ok(_) => {
+                            Ok(stored_path) => {
+                                root_seen.insert(stored_path);
                                 summary.counted += 1;
                                 if summary.counted % PROGRESS_EMIT_INTERVAL == 0 {
                                     emit_progress(
@@ -312,6 +423,10 @@ impl Scanner {
                         summary.skipped += 1;
                     }
                 }
+            }
+
+            if let Err(err) = db.mark_missing_for_root(root, &root_seen) {
+                summary.errors.push(format!("Failed to reconcile missing entries for {}: {}", root, err));
             }
         }
 
@@ -362,7 +477,7 @@ impl Scanner {
         path: &Path,
         db: &Database,
         hash_candidates: &mut HashMap<(u64, String), Vec<(i64, String)>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let metadata = self.file_walker.extract_metadata(path)?;
         let path_str = metadata.path.to_string_lossy().to_string();
         let parent_dir = metadata.parent_dir.to_string_lossy().to_string();
@@ -392,11 +507,11 @@ impl Scanner {
                 hash_candidates
                     .entry((metadata.size_bytes, partial))
                     .or_default()
-                    .push((file_id, path_str));
+                    .push((file_id, path_str.clone()));
             }
         }
 
-        Ok(())
+        Ok(path_str)
     }
 
     fn populate_full_hashes(

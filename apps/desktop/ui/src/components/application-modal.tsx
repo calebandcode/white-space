@@ -39,7 +39,7 @@ function ApplicationModal({ children }: React.PropsWithChildren) {
   const [open, setOpen] = React.useState(true)
   const startScan = useFolderStore((state) => state.startScan)
   const scanStatus = useFolderStore((state) => state.scan.status)
-  const isScanning = scanStatus === "running"
+  const isScanning = scanStatus === "running" || scanStatus === "queued"
 
   const handleStartScan = React.useCallback(() => {
     if (isScanning) return

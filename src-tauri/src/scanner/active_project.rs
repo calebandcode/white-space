@@ -281,7 +281,3 @@ impl Default for ActiveProjectDetector {
         Self::new()
     }
 }
-
-
-
-

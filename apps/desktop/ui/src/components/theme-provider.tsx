@@ -1,4 +1,4 @@
-﻿import { createContext, useContext, useEffect, useMemo, useState } from "react"
+﻿import * as React from "react"
 
 type Theme = "dark" | "light" | "system"
 
@@ -18,7 +18,7 @@ const initialState: ThemeProviderState = {
   setTheme: () => null,
 }
 
-const ThemeProviderContext = createContext<ThemeProviderState>(initialState)
+const ThemeProviderContext = React.createContext<ThemeProviderState>(initialState)
 
 export function ThemeProvider({
   children,
@@ -31,20 +31,18 @@ export function ThemeProvider({
     return (localStorage.getItem(storageKey) as Theme) || defaultTheme
   }
 
-  const [theme, setTheme] = useState<Theme>(getStoredTheme)
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">(() => {
+  const [theme, setTheme] = React.useState<Theme>(getStoredTheme)
+  const [resolvedTheme, setResolvedTheme] = React.useState<"light" | "dark">(() => {
     if (typeof window === "undefined") return "light"
     const initial = getStoredTheme()
     if (initial === "system") {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark"
-        : "light"
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
     }
 
     return initial
   })
 
-  useEffect(() => {
+  React.useEffect(() => {
     if (typeof window === "undefined") return
 
     const media = window.matchMedia("(prefers-color-scheme: dark)")
@@ -64,15 +62,14 @@ export function ThemeProvider({
     return () => media.removeEventListener("change", updateResolvedTheme)
   }, [theme])
 
-  useEffect(() => {
+  React.useEffect(() => {
     if (typeof window === "undefined") return
 
     const root = window.document.documentElement
     root.classList.remove("light", "dark")
     root.classList.add(resolvedTheme)
 
-    const tauriPresent =
-      "__TAURI_IPC__" in window || "__TAURI_INTERNALS__" in window
+    const tauriPresent = "__TAURI_IPC__" in window || "__TAURI_INTERNALS__" in window
 
     if (!tauriPresent) {
       return
@@ -80,11 +77,11 @@ export function ThemeProvider({
 
     const updateTauriTitlebar = async () => {
       try {
-        const { appWindow, WindowTheme } = await import(
-          "@tauri-apps/api/window"
-        )
+        const windowApi = await import("@tauri-apps/api/window")
+        const appWindow = (windowApi as any).appWindow
+        const WindowTheme = (windowApi as any).WindowTheme
 
-        if (typeof appWindow.setTheme === "function") {
+        if (appWindow && typeof appWindow.setTheme === "function" && WindowTheme) {
           await appWindow.setTheme(
             resolvedTheme === "dark" ? WindowTheme.Dark : WindowTheme.Light
           )
@@ -97,7 +94,7 @@ export function ThemeProvider({
     updateTauriTitlebar()
   }, [resolvedTheme])
 
-  const value = useMemo(
+  const value = React.useMemo(
     () => ({
       theme,
       setTheme: (nextTheme: Theme) => {
@@ -118,7 +115,7 @@ export function ThemeProvider({
 }
 
 export const useTheme = () => {
-  const context = useContext(ThemeProviderContext)
+  const context = React.useContext(ThemeProviderContext)
 
   if (context === undefined)
     throw new Error("useTheme must be used within a ThemeProvider")

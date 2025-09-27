@@ -1,10 +1,9 @@
-import * as React from 'react'
+﻿import * as React from "react"
 
-import { Button } from '@/components/ui/button'
-import { Loader2, PauseCircle } from 'lucide-react'
-import GaugeBar from '@/components/GaugeBar'
-import { notifySweepReady } from '@/lib/notify'
-import { formatBytes, thresholds, GB } from '@/hooks/useGauge'
+import { Button } from "@/components/ui/button"
+import { Loader2, PauseCircle } from "lucide-react"
+import GaugeBar from "@/components/GaugeBar"
+import { formatBytes } from "@/hooks/useGauge"
 
 export interface BottomBarProps {
   scanning: boolean
@@ -19,8 +18,10 @@ export interface BottomBarProps {
   potentialBytes: number
   stagedBytes: number
   freedBytes: number
-  maxCapacity?: number
-  onOpenReview: () => void
+  windowStart?: string | null
+  windowEnd?: string | null
+  sweepLevel: "none" | "soft" | "hard"
+  onOpenArchive: () => void
 }
 
 export default function BottomBar({
@@ -36,23 +37,11 @@ export default function BottomBar({
   potentialBytes,
   stagedBytes,
   freedBytes,
-  maxCapacity = 4 * GB,
-  onOpenReview,
+  windowStart,
+  windowEnd,
+  sweepLevel,
+  onOpenArchive,
 }: BottomBarProps) {
-  const { soft, hard } = thresholds(stagedBytes)
-  const prevBuckets = React.useRef({ soft: false, hard: false })
-
-  React.useEffect(() => {
-    const next = { soft, hard }
-    if (next.hard && !prevBuckets.current.hard) {
-      void notifySweepReady(stagedBytes)
-      onOpenReview()
-    } else if (next.soft && !prevBuckets.current.soft) {
-      void notifySweepReady(stagedBytes)
-    }
-    prevBuckets.current = next
-  }, [hard, onOpenReview, soft, stagedBytes])
-
   const statusContent = React.useMemo(() => {
     if (scanning) {
       return (
@@ -61,11 +50,11 @@ export default function BottomBar({
           <div className="min-w-0">
             <span className="font-medium">Scanning</span>
             {scanSummary ? <span className="ml-2 text-primary/70">{scanSummary}</span> : null}
-            {/* {currentPathDisplay ? (
+            {currentPathDisplay ? (
               <p className="truncate text-[11px] text-primary/60" title={currentPathDisplay}>
-                {currentPathDisplay.slice(0, 30) + "..."}
+                {currentPathDisplay}
               </p>
-            ) : null} */}
+            ) : null}
           </div>
         </div>
       )
@@ -88,10 +77,30 @@ export default function BottomBar({
 
   const hasErrors = errorMessages.length > 0
 
+  const sweepCallout = React.useMemo(() => {
+    if (sweepLevel === "hard") {
+      return (
+        <Button variant="destructive" size="sm" onClick={onOpenArchive}>
+          Review archive
+        </Button>
+      )
+    }
+
+    if (sweepLevel === "soft") {
+      return (
+        <span className="rounded-full border border-primary/40 px-2.5 py-1 text-xs text-primary">
+          Weekly sweep ready
+        </span>
+      )
+    }
+
+    return <span className="text-[11px] text-muted-foreground">{formatBytes(stagedBytes)} staged this window</span>
+  }, [onOpenArchive, stagedBytes, sweepLevel])
+
   return (
-    <div className="sticky bottom-0 z-40 border-t border-border/60 bg-background/80 mt-15 pt-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="flex flex-1 items-center gap-2 text-xs">
+    <div className="sticky bottom-0 z-40 mt-6 border-t border-border/60 bg-background/90 pb-4 pt-4 backdrop-blur supports-[backdrop-filter]:bg-background/70">
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-1 flex-wrap items-center gap-2 text-xs">
           {statusContent}
           {hasErrors ? (
             <div className="flex min-w-0 flex-col gap-1 text-destructive" aria-live="polite">
@@ -113,36 +122,19 @@ export default function BottomBar({
           ) : null}
         </div>
 
-        <div className="flex w-full flex-col gap-1 md:mx-4 md:w-auto md:flex-1">
+      
+
+        <div className="flex items-center gap-2">{sweepCallout}</div>
+      </div>
+        <div className="flex w-full flex-col gap-2 mt-4 md:w-auto md:flex-1">
           <GaugeBar
             potentialBytes={potentialBytes}
             stagedBytes={stagedBytes}
             freedBytes={freedBytes}
-            maxCapacity={maxCapacity}
+            windowStart={windowStart}
+            windowEnd={windowEnd}
           />
-          <div className="flex justify-between text-[9px] uppercase tracking-wide text-muted-foreground">
-            <span>Potential</span>
-            <span>Staged</span>
-            <span>Freed</span>
-          </div>
         </div>
-
-        <div className="flex items-center gap-2">
-          {hard ? (
-            <Button variant="destructive" size="sm" onClick={onOpenReview}>
-              Review & delete
-            </Button>
-          ) : soft ? (
-            <span className="rounded-full border border-primary/40 px-2.5 py-1 text-xs text-primary">
-              Weekly sweep ready
-            </span>
-          ) : (
-            <span className="text-[11px] text-muted-foreground">
-              {formatBytes(stagedBytes)} staged this week
-            </span>
-          )}
-        </div>
-      </div>
     </div>
   )
 }
