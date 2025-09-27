@@ -93,20 +93,22 @@ impl UndoManager {
     }
 
     fn get_last_batch(&self, db: &Database) -> OpsResult<BatchInfo> {
-        let batch_id = db.get_latest_batch_id()
+        let batch_id = db
+            .get_latest_batch_id()
             .map_err(|e| OpsError::UndoError(format!("Failed to get latest batch: {}", e)))?
             .ok_or_else(|| OpsError::UndoError("No batches found".to_string()))?;
-        
-        let actions = db.get_actions_by_batch_id(&batch_id)
+
+        let actions = db
+            .get_actions_by_batch_id(&batch_id)
             .map_err(|e| OpsError::UndoError(format!("Failed to get batch actions: {}", e)))?;
-        
+
         if actions.is_empty() {
             return Err(OpsError::UndoError("Batch has no actions".to_string()));
         }
-        
+
         let action_type = actions[0].action.clone();
         let created_at = actions[0].created_at;
-        
+
         Ok(BatchInfo {
             batch_id,
             action_type,
@@ -172,7 +174,19 @@ impl UndoManager {
 
     fn reverse_action(&self, action: &Action, db: &Database) -> OpsResult<()> {
         match action.action {
-            ActionType::Archive => self.restore_from_archive(action),
+            ActionType::Archive => {
+                self.restore_from_archive(action)?;
+                if let Some(original_path) = action.src_path.as_ref() {
+                    db.update_file_location(action.file_id, original_path)
+                        .map_err(|e| {
+                            OpsError::UndoError(format!("Failed to reset file location: {}", e))
+                        })?;
+                }
+                db.mark_files_unstaged(&[action.file_id]).map_err(|e| {
+                    OpsError::UndoError(format!("Failed to clear staged flag: {}", e))
+                })?;
+                Ok(())
+            }
             ActionType::Delete => self.restore_from_trash(action),
             ActionType::Restore => Err(OpsError::UndoError(
                 "Cannot undo restore action".to_string(),
@@ -296,6 +310,8 @@ impl UndoManager {
             batch_id: action.batch_id.clone(),
             src_path: action.dst_path.clone(),
             dst_path: action.src_path.clone(),
+            origin: Some("undo_manager".to_string()),
+            note: None,
         };
 
         db.insert_action(&restore_action)
@@ -305,9 +321,10 @@ impl UndoManager {
     }
 
     pub fn get_undoable_batches(&self, db: &Database) -> OpsResult<Vec<BatchInfo>> {
-        let batch_ids = db.get_undoable_batches()
+        let batch_ids = db
+            .get_undoable_batches()
             .map_err(|e| OpsError::UndoError(format!("Failed to get undoable batches: {}", e)))?;
-        
+
         let mut batches = Vec::new();
         for batch_id in batch_ids {
             match self.get_batch_by_id(&batch_id, db) {
@@ -318,7 +335,7 @@ impl UndoManager {
                 }
             }
         }
-        
+
         Ok(batches)
     }
 
@@ -336,16 +353,17 @@ impl UndoManager {
     }
 
     pub fn get_batch_by_id(&self, batch_id: &str, db: &Database) -> OpsResult<BatchInfo> {
-        let actions = db.get_actions_by_batch_id(batch_id)
+        let actions = db
+            .get_actions_by_batch_id(batch_id)
             .map_err(|e| OpsError::UndoError(format!("Failed to get batch actions: {}", e)))?;
-        
+
         if actions.is_empty() {
             return Err(OpsError::UndoError(format!("Batch {} not found", batch_id)));
         }
-        
+
         let action_type = actions[0].action.clone();
         let created_at = actions[0].created_at;
-        
+
         Ok(BatchInfo {
             batch_id: batch_id.to_string(),
             action_type,

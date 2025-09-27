@@ -273,6 +273,8 @@ impl DeleteManager {
             batch_id: Some(batch_id.to_string()),
             src_path: Some(src_path.to_string()),
             dst_path: Some(dst_path.to_string()),
+            origin: Some("delete_manager".to_string()),
+            note: None,
         };
 
         db.insert_action(&action)

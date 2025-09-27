@@ -12,7 +12,3 @@ pub use undo::{BatchInfo, UndoManager, UndoResult};
 
 // Re-export commonly used types
 pub use crate::models::{ActionType, NewAction};
-
-
-
-

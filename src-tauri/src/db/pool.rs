@@ -8,7 +8,3 @@ pub fn init_pool(db_path: &Path) -> DbPool {
     let manager = SqliteConnectionManager::file(db_path);
     Pool::new(manager).expect("failed to create sqlite pool")
 }
-
-
-
-

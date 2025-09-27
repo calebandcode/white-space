@@ -13,6 +13,7 @@ use db::{init_pool, DbPool};
 use licensing::LicenseStorage;
 use std::path::PathBuf;
 use tauri::Manager;
+use scanner::watcher;
 
 // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
 #[tauri::command]
@@ -45,14 +46,18 @@ pub fn run() {
             let pool = init_pool(&db_path);
 
             // Run migrations on first connection
-            let conn = pool.get().expect("Failed to get database connection");
-            let db = db::Database::new(conn);
-            if let Err(e) = db.run_migrations() {
-                eprintln!("Database migration error: {}", e);
-                eprintln!("This might be due to database file permissions or corruption.");
-                eprintln!("Try deleting the database file and restarting the application.");
-                return Err(e.into());
+            {
+                let conn = pool.get().expect("Failed to get database connection");
+                let db = db::Database::new(conn);
+                if let Err(e) = db.run_migrations() {
+                    eprintln!("Database migration error: {}", e);
+                    eprintln!("This might be due to database file permissions or corruption.");
+                    eprintln!("Try deleting the database file and restarting the application.");
+                    return Err(e.into());
+                }
             }
+
+            let pool_for_watcher = pool.clone();
 
             app.manage::<DbPool>(pool);
 
@@ -60,6 +65,10 @@ pub fn run() {
             app.manage(LicenseStorage {
                 cache: tokio::sync::RwLock::new(Default::default()),
             });
+
+            if let Err(err) = watcher::start_watchers(app.handle().clone(), pool_for_watcher) {
+                eprintln!("File watcher failed to start: {err}");
+            }
 
             Ok(())
         })
@@ -81,6 +90,11 @@ pub fn run() {
             commands::daily_candidates,
             commands::get_candidates_bucketed,
             commands::gauge_state,
+            commands::list_staged,
+            commands::stage_files,
+            commands::restore_staged,
+            commands::empty_staged,
+            commands::get_duplicate_groups,
             commands::archive_files,
             commands::delete_files,
             commands::undo_last,

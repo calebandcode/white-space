@@ -128,10 +128,10 @@ impl SpaceManager {
     #[cfg(unix)]
     fn read_filesystem_info(&self, mount_point: &Path) -> OpsResult<u64> {
         use std::os::unix::fs::MetadataExt;
-        
+
         let metadata = fs::metadata(mount_point)
             .map_err(|e| OpsError::SpaceError(format!("Failed to get metadata: {}", e)))?;
-        
+
         // For Unix systems, we can use statvfs for more accurate space info
         // For now, return the available space from metadata
         Ok(metadata.blocks() * 512) // blocks * block_size
@@ -206,10 +206,10 @@ impl SpaceManager {
     #[cfg(unix)]
     fn get_total_space_unix(&self, path: &Path) -> OpsResult<u64> {
         use std::os::unix::fs::MetadataExt;
-        
+
         let metadata = fs::metadata(path)
             .map_err(|e| OpsError::SpaceError(format!("Failed to get metadata: {}", e)))?;
-        
+
         // For Unix systems, we can use statvfs for more accurate space info
         // For now, return the total space from metadata
         Ok(metadata.blocks() * 512) // blocks * block_size

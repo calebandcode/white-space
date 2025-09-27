@@ -1,8 +1,9 @@
 use crate::db::{Database, DbPool};
 use crate::gauge::{GaugeManager, GaugeState};
-use crate::models::WatchedRoot;
+use crate::models::{ActionType, File, NewStagedFile, StagedFileRecord, WatchedRoot};
 use crate::ops::{ArchiveManager, DeleteManager, UndoManager, UndoResult};
 use crate::scanner::{self, ScanResult, Scanner};
+use crate::scanner::watcher::{register_root, unregister_root};
 use crate::selector::{scoring::Candidate, FileSelector};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashSet;
@@ -34,13 +35,55 @@ pub struct DeleteOutcome {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct StageOutcome {
+    pub success: bool,
+    pub batch_id: Option<String>,
+    pub staged_files: usize,
+    pub total_bytes: u64,
+    pub duration_ms: u64,
+    pub errors: Vec<String>,
+    pub expires_at: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct StageOptions {
+    pub cooloff_days: Option<i64>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DuplicateGroupFile {
+    pub id: i64,
+    pub path: String,
+    pub parent_dir: String,
+    pub size_bytes: u64,
+    pub last_seen_at: String,
+    pub is_staged: bool,
+    pub cooloff_until: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DuplicateGroup {
+    pub hash: String,
+    pub total_size: u64,
+    pub count: usize,
+    pub files: Vec<DuplicateGroupFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StagedFile {
+    pub record_id: i64,
     pub file_id: i64,
     pub path: String,
-    pub size_bytes: u64,
-    pub archived_at: DateTime<Utc>,
-    pub age_days: u32,
     pub parent_dir: String,
+    pub size_bytes: u64,
+    pub status: String,
+    pub staged_at: String,
+    pub expires_at: Option<String>,
+    pub batch_id: Option<String>,
+    pub note: Option<String>,
+    pub cooloff_until: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -147,29 +190,29 @@ pub struct PartialUserPrefs {
 pub struct GetCandidatesBucketedParams {
     /// Maximum number of results to return
     pub limit: Option<usize>,
-    
+
     /// Number of results to skip (for pagination)
     pub offset: Option<usize>,
-    
+
     /// Minimum confidence score for including candidates
     pub min_confidence: Option<f64>,
-    
+
     /// Maximum number of results to return per bucket
     pub max_results_per_bucket: Option<usize>,
-    
+
     /// Whether to include archived files in results
     pub include_archived: Option<bool>,
-    
+
     /// Whether to include deleted files in results
     pub include_deleted: Option<bool>,
-    
+
     /// Optional path to scope the results to a specific directory
     #[serde(default)]
     pub root_path: Option<String>,
-    
+
     /// Optional list of bucket types to include
     pub buckets: Option<Vec<String>>,
-    
+
     /// Sorting criteria (e.g., "size_desc", "age_desc", "name_asc")
     pub sort: Option<String>,
 }
@@ -200,29 +243,17 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-
 fn command_error_to_string(err: CommandError) -> String {
     err.to_string()
 }
 
 fn map_io_error(action: &str, path: &Path, err: std::io::Error) -> CommandError {
     match err.kind() {
-        ErrorKind::NotFound => CommandError::NotFound(format!(
-            "{}: {}",
-            action,
-            path.display()
-        )),
-        ErrorKind::PermissionDenied => CommandError::Permission(format!(
-            "{}: {}",
-            action,
-            path.display()
-        )),
-        _ => CommandError::FileSystem(format!(
-            "Failed to {} {}: {}",
-            action,
-            path.display(),
-            err
-        )),
+        ErrorKind::NotFound => CommandError::NotFound(format!("{}: {}", action, path.display())),
+        ErrorKind::PermissionDenied => {
+            CommandError::Permission(format!("{}: {}", action, path.display()))
+        }
+        _ => CommandError::FileSystem(format!("Failed to {} {}: {}", action, path.display(), err)),
     }
 }
 
@@ -238,6 +269,17 @@ fn sanitize_string(input: &str) -> String {
         }
     }
     sanitized
+}
+
+fn sanitize_note(note: Option<String>) -> Option<String> {
+    note.map(|raw| {
+        let mut sanitized = sanitize_string(&raw);
+        if sanitized.len() > 256 {
+            sanitized.truncate(256);
+        }
+        sanitized
+    })
+    .filter(|s| !s.is_empty())
 }
 
 fn normalize_directory_path(path: &Path) -> Result<PathBuf, CommandError> {
@@ -258,7 +300,10 @@ fn normalize_directory_path(path: &Path) -> Result<PathBuf, CommandError> {
 
 fn normalize_existing_path(path: &Path) -> Result<PathBuf, CommandError> {
     if !path.exists() {
-        return Err(CommandError::NotFound(format!("Path not found: {}", path.display())));
+        return Err(CommandError::NotFound(format!(
+            "Path not found: {}",
+            path.display()
+        )));
     }
     path.canonicalize()
         .or_else(|_| Ok(path.to_path_buf()))
@@ -281,6 +326,27 @@ fn watched_root_to_folder(root: WatchedRoot) -> WatchedFolder {
     }
 }
 
+fn staged_payload(record: &StagedFileRecord, file: &File) -> StagedFile {
+    let size = if file.size_bytes < 0 {
+        0
+    } else {
+        file.size_bytes as u64
+    };
+    StagedFile {
+        record_id: record.id,
+        file_id: record.file_id,
+        path: file.path.clone(),
+        parent_dir: file.parent_dir.clone(),
+        size_bytes: size,
+        status: record.status.clone(),
+        staged_at: record.staged_at.to_rfc3339(),
+        expires_at: record.expires_at.map(|dt| dt.to_rfc3339()),
+        batch_id: record.batch_id.clone(),
+        note: record.note.clone(),
+        cooloff_until: file.cooloff_until.map(|dt| dt.to_rfc3339()),
+    }
+}
+
 fn ensure_within_watched(path: &Path, roots: &[WatchedRoot]) -> Result<(), CommandError> {
     if is_within_watched_roots(path, roots) {
         Ok(())
@@ -290,8 +356,6 @@ fn ensure_within_watched(path: &Path, roots: &[WatchedRoot]) -> Result<(), Comma
         ))
     }
 }
-
-
 
 fn validate_file_ids(file_ids: &[i64]) -> Result<(), CommandError> {
     if file_ids.is_empty() {
@@ -314,16 +378,23 @@ fn validate_path(path: &str) -> Result<PathBuf, CommandError> {
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(CommandError::Validation("Path traversal not allowed".to_string()));
+        return Err(CommandError::Validation(
+            "Path traversal not allowed".to_string(),
+        ));
     }
 
     // Be permissive like scan validation: allow any existing directory, but block system roots
     if path_buf.is_absolute() {
         if !path_buf.exists() {
-            return Err(CommandError::NotFound(format!("Path does not exist: {}", path)));
+            return Err(CommandError::NotFound(format!(
+                "Path does not exist: {}",
+                path
+            )));
         }
         if is_system_root(&path_buf) {
-            return Err(CommandError::Permission("Watching the system root is not supported".to_string()));
+            return Err(CommandError::Permission(
+                "Watching the system root is not supported".to_string(),
+            ));
         }
     }
 
@@ -336,25 +407,31 @@ fn validate_scan_path(path: &str) -> Result<PathBuf, CommandError> {
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(CommandError::Validation("Path traversal not allowed".to_string()));
+        return Err(CommandError::Validation(
+            "Path traversal not allowed".to_string(),
+        ));
     }
 
     // For scan operations, be more permissive - allow any path that exists and is accessible
     if path_buf.is_absolute() {
         // Check if path exists and is accessible
         if !path_buf.exists() {
-            return Err(CommandError::NotFound(format!("Path does not exist: {}", path)));
+            return Err(CommandError::NotFound(format!(
+                "Path does not exist: {}",
+                path
+            )));
         }
-        
+
         // Additional security: ensure it's not a system directory
         if is_system_root(&path_buf) {
-            return Err(CommandError::Permission("Cannot scan system root".to_string()));
+            return Err(CommandError::Permission(
+                "Cannot scan system root".to_string(),
+            ));
         }
     }
 
     Ok(path_buf)
 }
-
 
 fn open_path_with_system(path: &Path, reveal: bool) -> Result<(), CommandError> {
     #[cfg(target_os = "windows")]
@@ -569,7 +646,11 @@ pub async fn add_folder(path: String, db: State<'_, DbPool>) -> Result<WatchedFo
     .await
     .map_err(|e| format!("join error: {e}"))??;
 
-    Ok(watched_root_to_folder(root))
+    let folder = watched_root_to_folder(root);
+    if let Err(err) = register_root(folder.path.as_str()) {
+        eprintln!("Failed to register watcher for {}: {}", folder.path, err);
+    }
+    Ok(folder)
 }
 
 #[tauri::command]
@@ -614,21 +695,29 @@ pub async fn remove_folder(id: i64, db: State<'_, DbPool>) -> Result<(), String>
     }
 
     let db_clone = db.inner().clone();
-    tokio::task::spawn_blocking(move || {
+    let removed_path = tokio::task::spawn_blocking(move || -> Result<String, String> {
         let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
         let db_instance = Database::new(conn);
         let root = db_instance
             .get_watched_root_by_id(id)
             .map_err(|e| format!("ERR_DATABASE: {}", e))?;
         match root {
-            Some(r) => db_instance
-                .delete_watched_root(&r.path)
-                .map_err(|e| format!("ERR_DATABASE: {}", e)),
+            Some(r) => {
+                let path = r.path.clone();
+                db_instance
+                    .delete_watched_root(&r.path)
+                    .map_err(|e| format!("ERR_DATABASE: {}", e))?;
+                Ok(path)
+            }
             None => Err("ERR_NOT_FOUND: Watched folder not found".to_string()),
         }
     })
     .await
     .map_err(|e| format!("join error: {e}"))??;
+
+    if let Err(err) = unregister_root(removed_path.as_str()) {
+        eprintln!("Failed to unregister watcher for {}: {}", removed_path, err);
+    }
 
     Ok(())
 }
@@ -811,7 +900,11 @@ pub async fn rescan_all(app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<
 }
 
 #[tauri::command]
-pub async fn rescan_folder(path: String, app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<(), String> {
+pub async fn rescan_folder(
+    path: String,
+    app: tauri::AppHandle,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err("ERR_VALIDATION: Path cannot be empty".to_string());
     }
@@ -831,11 +924,15 @@ pub async fn rescan_folder(path: String, app: tauri::AppHandle, db: State<'_, Db
     .await
     .map_err(|e| format!("join error: {e}"))??;
 
-    if !watched.iter().any(|p| canonicalize_or_clone(Path::new(p)) == canonicalize_or_clone(Path::new(&root))) {
+    if !watched
+        .iter()
+        .any(|p| canonicalize_or_clone(Path::new(p)) == canonicalize_or_clone(Path::new(&root)))
+    {
         return Err("ERR_PERMISSION: Path is not a watched root".to_string());
     }
 
-    scanner::start_scan(app, db.inner().clone(), vec![root]).map_err(|e| format!("ERR_SCAN: {e}"))?;
+    scanner::start_scan(app, db.inner().clone(), vec![root])
+        .map_err(|e| format!("ERR_SCAN: {e}"))?;
     Ok(())
 }
 #[tauri::command]
@@ -862,7 +959,6 @@ fn normalize_bucket_key(reason: &str) -> String {
         other => other.replace(' ', "_"),
     }
 }
-
 
 pub(crate) fn filter_candidates_by_root_path(
     candidates: &mut Vec<Candidate>,
@@ -893,7 +989,6 @@ pub(crate) fn filter_candidates_by_root_path(
     });
 }
 
-
 #[tauri::command]
 pub async fn get_candidates_bucketed(
     params: Option<GetCandidatesBucketedParams>,
@@ -913,11 +1008,17 @@ pub async fn get_candidates_bucketed(
 
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
-    if limit == 0 { return Err("ERR_VALIDATION: limit must be > 0".to_string()); }
+    if limit == 0 {
+        return Err("ERR_VALIDATION: limit must be > 0".to_string());
+    }
 
     let db_clone = db.inner().clone();
     // If root_path is provided, pull a larger pool to avoid filtering away all results
-    let fetch_size = if params.root_path.is_some() { (limit + offset).saturating_mul(50).min(10_000) } else { limit + offset };
+    let fetch_size = if params.root_path.is_some() {
+        (limit + offset).saturating_mul(50).min(10_000)
+    } else {
+        limit + offset
+    };
     let (mut candidates, mut errors) = tokio::task::spawn_blocking(move || {
         let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
         let selector = FileSelector::new();
@@ -936,31 +1037,44 @@ pub async fn get_candidates_bucketed(
     }
 
     // Filter by requested buckets if provided
-    let requested_buckets: std::collections::HashSet<String> = params.buckets
+    let requested_buckets: std::collections::HashSet<String> = params
+        .buckets
         .as_ref()
         .map(|buckets| buckets.iter().map(|s| normalize_bucket_key(s)).collect())
         .unwrap_or_default();
-        
+
     if !requested_buckets.is_empty() {
         candidates.retain(|c| requested_buckets.contains(&normalize_bucket_key(&c.reason)));
     }
 
     // Sort
     match params.sort.as_deref() {
-        Some("size_desc") => candidates.sort_by(|a,b| b.size_bytes.cmp(&a.size_bytes)),
-        Some("age_desc") => candidates.sort_by(|a,b| b.age_days.partial_cmp(&a.age_days).unwrap_or(std::cmp::Ordering::Equal)),
-        Some("name_asc") => candidates.sort_by(|a,b| a.path.to_lowercase().cmp(&b.path.to_lowercase())),
+        Some("size_desc") => candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
+        Some("age_desc") => candidates.sort_by(|a, b| {
+            b.age_days
+                .partial_cmp(&a.age_days)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        Some("name_asc") => {
+            candidates.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+        }
         _ => {}
     }
 
     // Recompute total_count AFTER filtering and sorting
     let mut total_count = candidates.len();
     let slice_end = (offset + limit).min(total_count);
-    let paged = if offset < total_count { candidates[offset..slice_end].to_vec() } else { Vec::new() };
+    let paged = if offset < total_count {
+        candidates[offset..slice_end].to_vec()
+    } else {
+        Vec::new()
+    };
     let has_more = slice_end < total_count;
 
-    let mut by_bucket: std::collections::HashMap<String, Vec<UiCandidate>> = std::collections::HashMap::new();
-    let mut summaries_acc: std::collections::HashMap<String, (usize, u64)> = std::collections::HashMap::new();
+    let mut by_bucket: std::collections::HashMap<String, Vec<UiCandidate>> =
+        std::collections::HashMap::new();
+    let mut summaries_acc: std::collections::HashMap<String, (usize, u64)> =
+        std::collections::HashMap::new();
 
     for c in paged {
         let key = normalize_bucket_key(&c.reason);
@@ -1009,14 +1123,29 @@ pub async fn get_candidates_bucketed(
             let walker = WalkDir::new(&root).max_depth(2).into_iter();
             for entry in walker.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                if !path.is_file() { continue; }
+                if !path.is_file() {
+                    continue;
+                }
                 let path_str = path.to_string_lossy().to_string();
-                let name_lower = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
-                let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| root.clone());
-                let meta = match std::fs::metadata(path) { Ok(m) => m, Err(_) => continue };
+                let name_lower = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let parent = path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.clone());
+                let meta = match std::fs::metadata(path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
                 let size = meta.len();
                 let modified = meta.modified().ok();
-                let is_old = modified.and_then(|m| now.duration_since(m).ok()).map(|d| d >= thirty_days).unwrap_or(false);
+                let is_old = modified
+                    .and_then(|m| now.duration_since(m).ok())
+                    .map(|d| d >= thirty_days)
+                    .unwrap_or(false);
 
                 let parent_lower = parent.to_lowercase();
                 let in_downloads = parent_lower.contains("downloads");
@@ -1024,7 +1153,9 @@ pub async fn get_candidates_bucketed(
 
                 let mut bucket: Option<&str> = None;
                 if name_lower.ends_with(".exe") {
-                    if in_downloads || is_old { bucket = Some("executable"); }
+                    if in_downloads || is_old {
+                        bucket = Some("executable");
+                    }
                 } else if in_downloads && is_old {
                     bucket = Some("big_download");
                 } else if in_desktop && is_old {
@@ -1058,14 +1189,22 @@ pub async fn get_candidates_bucketed(
 
     let summaries = summaries_acc
         .into_iter()
-        .map(|(k, (count, bytes))| BucketSummary { key: k, count, total_bytes: bytes })
+        .map(|(k, (count, bytes))| BucketSummary {
+            key: k,
+            count,
+            total_bytes: bytes,
+        })
         .collect::<Vec<_>>();
 
     Ok(CandidatesResponse {
         by_bucket,
         summaries,
         total_count,
-        paging: Paging { limit, offset, has_more: has_more },
+        paging: Paging {
+            limit,
+            offset,
+            has_more: has_more,
+        },
         errors,
     })
 }
@@ -1163,6 +1302,301 @@ pub async fn gauge_state(db: State<'_, DbPool>) -> Result<GaugeState, String> {
     .map_err(|e| format!("join error: {e}"))??;
 
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn list_staged(
+    statuses: Option<Vec<String>>,
+    db: State<'_, DbPool>,
+) -> Result<Vec<StagedFile>, String> {
+    let status_filter = statuses.map(|items| {
+        items
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+    });
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let pairs = match status_filter {
+            Some(filters) => db_instance
+                .list_staged_with_files(Some(filters.as_slice()))
+                .map_err(|e| format!("ERR_DATABASE: {e}"))?,
+            None => db_instance
+                .list_staged_with_files(None)
+                .map_err(|e| format!("ERR_DATABASE: {e}"))?,
+        };
+        let mut results = Vec::with_capacity(pairs.len());
+        for (record, file) in pairs {
+            results.push(staged_payload(&record, &file));
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn stage_files(
+    file_ids: Vec<i64>,
+    options: Option<StageOptions>,
+    db: State<'_, DbPool>,
+) -> Result<StageOutcome, String> {
+    validate_file_ids(&file_ids).map_err(|e| format!("ERR_VALIDATION: {e}"))?;
+    if file_ids.is_empty() {
+        return Err("ERR_VALIDATION: No file IDs provided".to_string());
+    }
+
+    let mut opts = options.unwrap_or_default();
+    let mut cooloff_days = opts.cooloff_days.take().unwrap_or(7);
+    if cooloff_days < 0 {
+        cooloff_days = 0;
+    }
+    if cooloff_days > 30 {
+        cooloff_days = 30;
+    }
+    let note = sanitize_note(opts.note.take());
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let mut db_instance = Database::new(conn);
+        let mut archive_manager = ArchiveManager::new();
+
+        let mut unique_ids = HashSet::new();
+        let mut file_paths = Vec::new();
+        for file_id in &file_ids {
+            if !unique_ids.insert(*file_id) {
+                continue;
+            }
+            let file = db_instance
+                .get_file_by_id(*file_id)
+                .map_err(|e| format!("ERR_DATABASE: {e}"))?
+                .ok_or_else(|| format!("ERR_NOT_FOUND: File with ID {} not found", file_id))?;
+            if file.is_deleted {
+                return Err(format!(
+                    "ERR_VALIDATION: File with ID {} has been deleted",
+                    file_id
+                ));
+            }
+            let file_path = Path::new(&file.path);
+            if !file_path.exists() {
+                return Err(format!(
+                    "ERR_NOT_FOUND: File with ID {} not found on disk",
+                    file_id
+                ));
+            }
+            file_paths.push(file.path.clone());
+        }
+
+        if file_paths.is_empty() {
+            return Err("ERR_VALIDATION: No unique file paths to stage".to_string());
+        }
+
+        let archive_result = archive_manager
+            .archive_files(file_paths, &db_instance)
+            .map_err(|e| format!("ERR_ARCHIVE: {e}"))?;
+
+        let actions = db_instance
+            .get_actions_by_batch_id(&archive_result.batch_id)
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+
+        let archived_actions: Vec<_> = actions
+            .into_iter()
+            .filter(|action| action.action == ActionType::Archive)
+            .collect();
+
+        let expires_at_dt = if cooloff_days > 0 {
+            Some(Utc::now() + Duration::days(cooloff_days))
+        } else {
+            None
+        };
+
+        let mut staged_entries = Vec::new();
+        for action in &archived_actions {
+            let batch_id = action
+                .batch_id
+                .clone()
+                .or_else(|| Some(archive_result.batch_id.clone()));
+            staged_entries.push(NewStagedFile {
+                file_id: action.file_id,
+                staged_at: action.created_at,
+                expires_at: expires_at_dt.clone(),
+                batch_id,
+                status: "staged".to_string(),
+                note: note.clone(),
+            });
+        }
+
+        if !staged_entries.is_empty() {
+            db_instance
+                .stage_files(&staged_entries)
+                .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+        }
+
+        let outcome = StageOutcome {
+            success: archive_result.errors.is_empty(),
+            batch_id: if staged_entries.is_empty() {
+                None
+            } else {
+                Some(archive_result.batch_id.clone())
+            },
+            staged_files: staged_entries.len(),
+            total_bytes: archive_result.total_bytes,
+            duration_ms: archive_result.duration_ms,
+            errors: archive_result.errors,
+            expires_at: expires_at_dt.map(|dt| dt.to_rfc3339()),
+            note,
+        };
+
+        Ok(outcome)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn restore_staged(batch_id: String, db: State<'_, DbPool>) -> Result<UndoResult, String> {
+    if batch_id.trim().is_empty() {
+        return Err("ERR_VALIDATION: batch_id cannot be empty".to_string());
+    }
+
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+
+        let actions = db_instance
+            .get_actions_by_batch_id(&batch_id)
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+        let archived_ids: Vec<i64> = actions
+            .iter()
+            .filter(|action| action.action == ActionType::Archive)
+            .map(|action| action.file_id)
+            .collect();
+
+        if archived_ids.is_empty() {
+            return Err(format!(
+                "ERR_NOT_FOUND: No archived files associated with batch {batch_id}"
+            ));
+        }
+
+        let mut undo_manager = UndoManager::new();
+        let result = undo_manager
+            .undo_batch(&batch_id, &db_instance)
+            .map_err(|e| format!("ERR_UNDO: {e}"))?;
+
+        db_instance
+            .update_staged_status(&archived_ids, "restored")
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+        db_instance
+            .mark_files_unstaged(&archived_ids)
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn empty_staged(
+    file_ids: Vec<i64>,
+    to_trash: bool,
+    db: State<'_, DbPool>,
+) -> Result<DeleteOutcome, String> {
+    validate_file_ids(&file_ids).map_err(|e| format!("ERR_VALIDATION: {e}"))?;
+    if file_ids.is_empty() {
+        return Err("ERR_VALIDATION: No file IDs provided".to_string());
+    }
+
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+
+        let mut file_paths = Vec::new();
+        for file_id in &file_ids {
+            let file = db_instance
+                .get_file_by_id(*file_id)
+                .map_err(|e| format!("ERR_DATABASE: {e}"))?
+                .ok_or_else(|| format!("ERR_NOT_FOUND: File with ID {} not found", file_id))?;
+            validate_path(&file.path).map_err(|e| format!("ERR_VALIDATION: {e}"))?;
+            file_paths.push(file.path);
+        }
+
+        let mut delete_manager = DeleteManager::new();
+        delete_manager.set_use_trash(to_trash);
+        let delete_result = delete_manager
+            .delete_files(file_paths, &db_instance)
+            .map_err(|e| format!("ERR_DELETE: {e}"))?;
+
+        db_instance
+            .update_staged_status(&file_ids, "emptied")
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+        db_instance
+            .mark_files_unstaged(&file_ids)
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+
+        Ok(DeleteOutcome {
+            success: delete_result.errors.is_empty(),
+            files_processed: delete_result.files_deleted,
+            total_bytes_freed: delete_result.total_bytes_freed,
+            duration_ms: delete_result.duration_ms,
+            errors: delete_result.errors,
+            to_trash,
+        })
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn get_duplicate_groups(
+    limit: Option<usize>,
+    db: State<'_, DbPool>,
+) -> Result<Vec<DuplicateGroup>, String> {
+    let fetch_limit = limit.unwrap_or(20).min(200);
+    let db_clone = db.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
+        let db_instance = Database::new(conn);
+        let groups = db_instance
+            .duplicate_groups(Some(fetch_limit))
+            .map_err(|e| format!("ERR_DATABASE: {e}"))?;
+        let mut response = Vec::with_capacity(groups.len());
+        for (hash, files) in groups {
+            let mut total_size = 0u64;
+            let mut group_files = Vec::with_capacity(files.len());
+            for file in files {
+                let file_id = file.id.unwrap_or(0);
+                let size = if file.size_bytes < 0 {
+                    0
+                } else {
+                    file.size_bytes as u64
+                };
+                total_size = total_size.saturating_add(size);
+                group_files.push(DuplicateGroupFile {
+                    id: file_id,
+                    path: file.path.clone(),
+                    parent_dir: file.parent_dir.clone(),
+                    size_bytes: size,
+                    last_seen_at: file.last_seen_at.to_rfc3339(),
+                    is_staged: file.is_staged,
+                    cooloff_until: file.cooloff_until.map(|dt| dt.to_rfc3339()),
+                });
+            }
+            response.push(DuplicateGroup {
+                hash,
+                total_size,
+                count: group_files.len(),
+                files: group_files,
+            });
+        }
+        Ok(response)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 #[tauri::command]
@@ -1292,8 +1726,7 @@ pub async fn list_undoable_batches(db: State<'_, DbPool>) -> Result<Vec<UndoBatc
         let conn = db_clone.get().map_err(|e| format!("db pool: {e}"))?;
         let db_instance = Database::new(conn);
         let undo = UndoManager::new();
-        undo
-            .get_undoable_batches(&db_instance)
+        undo.get_undoable_batches(&db_instance)
             .map_err(|e| format!("ERR_UNDO: {}", e))
     })
     .await
@@ -1601,5 +2034,3 @@ pub fn get_db_path() -> Result<PathBuf, CommandError> {
 
 #[cfg(test)]
 mod tests;
-
-

@@ -1,4 +1,4 @@
-import * as React from "react"
+﻿import * as React from "react"
 
 import { cn } from "@/lib/utils"
 import { FolderItem } from "./FolderItem"
@@ -9,11 +9,9 @@ export interface FolderGridProps {
   selectedIds?: string[]
   onSelect?: (id: string, multi?: boolean) => void
   onOpen?: (id: string) => void
-  onReveal?: (id: string) => void
   onRename?: (id: string, name: string) => void
   onRemove?: (id: string) => void
   openLabel?: string
-  revealLabel?: string
   onAddFolder: () => void
 }
 
@@ -22,11 +20,9 @@ export function FolderGrid({
   selectedIds,
   onSelect,
   onOpen,
-  onReveal,
   onRename,
   onRemove,
   openLabel,
-  revealLabel,
   onAddFolder,
 }: FolderGridProps) {
   const [internalSelection, setInternalSelection] = React.useState<string | null>(null)
@@ -73,11 +69,9 @@ export function FolderGrid({
             selected={effectiveSelection.includes(folder.id)}
             onSelect={handleSelect}
             onOpen={onOpen}
-            onReveal={onReveal}
             onRename={onRename}
             onRemove={onRemove}
             openLabel={openLabel}
-            revealLabel={revealLabel}
           />
         ))}
         <div role="listitem" className="flex">
@@ -97,4 +91,3 @@ export function FolderGrid({
     </div>
   )
 }
-

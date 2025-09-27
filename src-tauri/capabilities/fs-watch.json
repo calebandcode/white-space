@@ -1,0 +1,7 @@
+{
+  "identifier": "fs-watch",
+  "description": "Filesystem watcher permissions",
+  "permissions": [
+    "fs:allow-watch"
+  ]
+}

@@ -16,7 +16,7 @@ export default defineConfig({
   },
   build: {
     commonjsOptions: {
-      include: [/tauri-apps\/.*/],
+      include: [/node_modules/, /tauri-apps\/.*/],
     },
   },
   server: {

@@ -9,7 +9,6 @@ interface DirectoryPanelProps {
   folderName?: string
   onRetry?: () => void
   onOpenEntry?: (entry: DirectoryEntry) => void
-  onRevealEntry?: (entry: DirectoryEntry) => void
 }
 
 function formatBytes(value: number) {
@@ -43,7 +42,6 @@ export function DirectoryPanel({
   folderName,
   onRetry,
   onOpenEntry,
-  onRevealEntry,
 }: DirectoryPanelProps) {
   const directories = React.useMemo(
     () => entries.filter((entry) => entry.kind === "dir"),

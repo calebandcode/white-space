@@ -25,11 +25,11 @@ interface ScanErrorPayload {
 export function useScanEvents() {
   const handleProgress = useFolderStore((state) => state.handleScanProgress)
   const handleDone = useFolderStore((state) => state.handleScanDone)
+  const handleQueued = useFolderStore((state) => state.handleScanQueued)
   const handleError = useFolderStore((state) => state.handleScanError)
   const refreshStatus = useFolderStore((state) => state.refreshScanStatus)
   const loadCandidates = useFolderStore((state) => state.loadCandidates)
   const loadDir = useFolderStore((state) => state.loadDir)
-  const selectedFolderId = useFolderStore((state) => state.selectedFolderId)
   const scanStatus = useFolderStore((state) => state.scan.status)
 
   useEffect(() => {
@@ -65,6 +65,15 @@ export function useScanEvents() {
         } else {
           unsubs.push(offError)
         }
+
+        const offQueued = await listen<{ roots: number }>("scan://queued", (event) => {
+          handleQueued(event.payload)
+        })
+        if (isCancelled) {
+          offQueued()
+        } else {
+          unsubs.push(offQueued)
+        }
       } catch (error) {
         console.error("Failed to register scan event listeners", error)
       }
@@ -82,7 +91,7 @@ export function useScanEvents() {
         }
       }
     }
-  }, [handleDone, handleError, handleProgress, refreshStatus])
+  }, [handleDone, handleError, handleProgress, handleQueued, refreshStatus])
 
   useEffect(() => {
     if (scanStatus !== "running") {

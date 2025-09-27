@@ -1,6 +1,40 @@
 import { create } from "zustand"
 
+import {
+  invokeCommand,
+  listStaged,
+  stageFiles as invokeStageFiles,
+  restoreStaged as invokeRestoreStaged,
+  emptyStaged as invokeEmptyStaged,
+  getDuplicateGroups as invokeDuplicateGroups,
+  fetchScanStatus,
+  type StageOptions as StageOptionsInput,
+  type StagedFileRecord as StageRecord,
+  type DuplicateGroup as DuplicateGroupResult,
+} from "@/lib/ipc"
 import type { DirectoryEntry, ScanCandidate, WatchedFolder } from "@/types/folders"
+
+import { notifySweepReady } from "@/lib/notify"
+
+const SOFT_SWEEP_THRESHOLD = 3 * 1024 ** 3
+const HARD_SWEEP_THRESHOLD = 4 * 1024 ** 3
+
+type SweepLevel = "none" | "soft" | "hard"
+
+export type StageBucket = {
+  key: string
+  batchId: string | null
+  records: StageRecord[]
+  fileIds: number[]
+  totalBytes: number
+  stagedAt: string | null
+  readyAt: string | null
+}
+
+export type StageBucketGroups = {
+  cooling: StageBucket[]
+  ready: StageBucket[]
+}
 
 type BackendWatchedFolder = {
   id: number
@@ -58,6 +92,9 @@ type BackendGaugeState = {
   potential_today_bytes: number
   staged_week_bytes: number
   freed_week_bytes: number
+  computed_at?: string | null
+  window_start?: string | null
+  window_end?: string | null
 }
 
 type BackendCandidate = {
@@ -105,8 +142,20 @@ type PlatformInfo = {
   openLabel: string
 }
 
+type StagedState = {
+  items: StageRecord[]
+  loading: boolean
+  error: string | null
+}
+
+type DuplicateState = {
+  groups: DuplicateGroupResult[]
+  loading: boolean
+  error: string | null
+}
+
 export type ScanInfo = {
-  status: "idle" | "running"
+  status: "idle" | "running" | "queued"
   scanned: number
   skipped: number
   errors: number
@@ -131,14 +180,6 @@ const initialScanInfo: ScanInfo = {
 
 async function openDirectoryDialog() {
   return invokeCommand<null | string>("pick_directory").then((result) => result ?? null)
-}
-
-async function invokeCommand<T = unknown>(
-  command: string,
-  args?: Record<string, unknown>
-): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core")
-  return invoke<T>(command, args)
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -185,6 +226,19 @@ function mapCandidate(candidate: BackendCandidate): ScanCandidate {
   }
 }
 
+function determineSweepLevel(stagedBytes: number): SweepLevel {
+  if (stagedBytes >= HARD_SWEEP_THRESHOLD) return "hard"
+  if (stagedBytes >= SOFT_SWEEP_THRESHOLD) return "soft"
+  return "none"
+}
+
+function parseIsoDate(value: string | null | undefined): number | null {
+  if (!value) return null
+  const ts = Date.parse(value)
+  if (Number.isNaN(ts)) return null
+  return ts
+}
+
 function normalizeReason(value: string): string {
   const lower = value.toLowerCase()
   if (lower === "screenshots") return "screenshot"
@@ -206,8 +260,19 @@ interface FolderStoreState {
   isLoadingEntries: boolean
   folderError: string | null
   entryError: string | null
-  gauge: { potentialBytes: number; stagedBytes: number; freedBytes: number; computedAt?: string | null }
+  gauge: {
+    potentialBytes: number
+    stagedBytes: number
+    freedBytes: number
+    computedAt: string | null
+    windowStart: string | null
+    windowEnd: string | null
+    sweepLevel: SweepLevel
+  }
   scan: ScanInfo
+  staged: StagedState
+  duplicates: DuplicateState
+  queuedRoots: number
   loadPlatform: () => Promise<void>
   loadFolders: () => Promise<void>
   addFolder: () => Promise<void>
@@ -215,7 +280,7 @@ interface FolderStoreState {
   selectFolder: (id: string | null) => Promise<void>
   loadDir: (folderId: string, pathOverride?: string) => Promise<void>
   loadGauge: () => Promise<void>
-  openInSystem: (path: string, reveal?: boolean) => Promise<void>
+  openInSystem: (path: string) => Promise<void>
   startScan: (paths?: string[]) => Promise<void>
   rescanAll: () => Promise<void>
   rescanFolder: (path: string) => Promise<void>
@@ -226,12 +291,20 @@ interface FolderStoreState {
   selectAllCandidates: () => void
   archiveSelected: () => Promise<void>
   deleteSelected: (toTrash?: boolean) => Promise<void>
+  stageFilesByIds: (fileIds: number[], options?: StageOptionsInput) => Promise<void>
   undoLast: () => Promise<void>
   listUndoableBatches: () => Promise<BackendUndoBatchSummary[]>
   undoBatch: (batchId: string) => Promise<BackendUndoResult>
   handleScanProgress: (payload: ScanProgressPayload) => void
   handleScanDone: (payload: ScanFinishedPayload) => Promise<void>
+  loadStaged: (statuses?: string[]) => Promise<void>
+  loadDuplicateGroups: () => Promise<void>
+  stageSelected: (options?: StageOptionsInput) => Promise<void>
+  restoreStageBatch: (batchId: string) => Promise<void>
+  emptyStageFiles: (fileIds: number[], toTrash?: boolean) => Promise<void>
+  handleScanQueued: (payload: { roots: number }) => void
   handleScanError: (payload: ScanErrorPayload) => void
+  getStagedBuckets: () => StageBucketGroups
 }
 
 export const useFolderStore = create<FolderStoreState>((set, get) => ({
@@ -245,8 +318,19 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   isLoadingEntries: false,
   folderError: null,
   entryError: null,
-  gauge: { potentialBytes: 0, stagedBytes: 0, freedBytes: 0, computedAt: null },
+  gauge: {
+    potentialBytes: 0,
+    stagedBytes: 0,
+    freedBytes: 0,
+    computedAt: null,
+    windowStart: null,
+    windowEnd: null,
+    sweepLevel: "none",
+  },
   scan: initialScanInfo,
+  staged: { items: [], loading: false, error: null },
+  duplicates: { groups: [], loading: false, error: null },
+  queuedRoots: 0,
 
   async loadPlatform() {
     try {
@@ -293,17 +377,28 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async loadGauge() {
     try {
-      const result = await invokeCommand<BackendGaugeState>('gauge_state')
+      const result = await invokeCommand<BackendGaugeState>("gauge_state")
+      const stagedBytes = result.staged_week_bytes ?? 0
+      const nextLevel = determineSweepLevel(stagedBytes)
+      const currentLevel = get().gauge.sweepLevel
+
+      if (nextLevel !== "none" && nextLevel !== currentLevel) {
+        void notifySweepReady(stagedBytes)
+      }
+
       set({
         gauge: {
           potentialBytes: result.potential_today_bytes ?? 0,
-          stagedBytes: result.staged_week_bytes ?? 0,
+          stagedBytes,
           freedBytes: result.freed_week_bytes ?? 0,
-          computedAt: new Date().toISOString(),
+          computedAt: result.computed_at ?? new Date().toISOString(),
+          windowStart: result.window_start ?? null,
+          windowEnd: result.window_end ?? null,
+          sweepLevel: nextLevel,
         },
       })
     } catch (error) {
-      console.error('Failed to load gauge state', error)
+      console.error("Failed to load gauge state", error)
     }
   },
 
@@ -385,10 +480,10 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     }
   },
 
-  async openInSystem(path, reveal = false) {
+  async openInSystem(path) {
     if (!path) return
     try {
-      await invokeCommand("open_in_system", { path, reveal })
+      await invokeCommand("open_in_system", { path, reveal: false })
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to open in system", error)
@@ -448,11 +543,12 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async refreshScanStatus() {
     try {
-      const payload = await invokeCommand<ScanStatusPayload>("scan_status")
-      const prev = get().scan
+      const payload = await fetchScanStatus<ScanStatusPayload>()
+      const { scan: prevScan, queuedRoots: prevQueued } = get()
       const nextStatus = payload.state === "running" ? "running" : "idle"
-      const wasRunning = prev.status === "running"
+      const wasRunning = prevScan.status === "running"
       const nowIdle = wasRunning && nextStatus === "idle"
+      const nextQueuedRoots = nextStatus === "running" ? 0 : prevQueued
 
       set(() => ({
         scan: {
@@ -463,16 +559,20 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
           startedAt: payload.started_at ?? null,
           finishedAt: payload.finished_at ?? null,
           currentPath: payload.current_path ?? null,
-          errorMessages: prev.errorMessages,
+          errorMessages: prevScan.errorMessages,
           lastError: payload.last_error ?? null,
         },
+        queuedRoots: nextQueuedRoots,
       }))
 
       if (nowIdle) {
-        // Scan just finished: refresh views and candidates
         const selectedFolderId = get().selectedFolderId
         await get().loadFolders()
-        await get().loadGauge()
+        await Promise.all([
+          get().loadGauge(),
+          get().loadStaged(),
+          get().loadDuplicateGroups(),
+        ])
         if (selectedFolderId) {
           await get().loadDir(selectedFolderId)
         }
@@ -528,6 +628,43 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     }
   },
 
+  async loadStaged(statuses?: string[]) {
+    set((state) => ({
+      staged: { ...state.staged, loading: true, error: null },
+    }))
+    try {
+      const records = await listStaged(statuses)
+      set((state) => ({
+        staged: { ...state.staged, items: records, loading: false, error: null },
+      }))
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to load staged entries", error)
+      set((state) => ({
+        staged: { ...state.staged, loading: false, error: message },
+      }))
+    }
+  },
+
+  async loadDuplicateGroups() {
+    set((state) => ({
+      duplicates: { ...state.duplicates, loading: true, error: null },
+    }))
+    try {
+      const groups = await invokeDuplicateGroups(50)
+      set((state) => ({
+        duplicates: { ...state.duplicates, groups, loading: false, error: null },
+      }))
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to load duplicate groups", error)
+      set((state) => ({
+        duplicates: { ...state.duplicates, loading: false, error: message },
+      }))
+    }
+  },
+
+
   toggleCandidate(fileId) {
     set((state) => {
       const exists = state.selectedCandidateIds.includes(fileId)
@@ -546,6 +683,38 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   selectAllCandidates() {
     set((state) => ({ selectedCandidateIds: state.candidates.map((c) => c.fileId) }))
   },
+
+  async stageSelected(options?: StageOptionsInput) {
+    const ids = get().selectedCandidateIds
+    if (!ids.length) return
+    await get().stageFilesByIds(ids, options)
+    set({ selectedCandidateIds: [] })
+  },
+
+  async stageFilesByIds(fileIds, options) {
+    if (!Array.isArray(fileIds) || fileIds.length === 0) return
+    try {
+      await invokeStageFiles(fileIds, options)
+      await Promise.all([
+        get().loadGauge(),
+        get().loadStaged(),
+        get().loadDuplicateGroups(),
+      ])
+      await get().loadCandidates()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to stage files", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+      throw error
+    }
+  },
+
 
   async archiveSelected() {
     const ids = get().selectedCandidateIds
@@ -589,6 +758,54 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     }
   },
 
+  async restoreStageBatch(batchId: string) {
+    if (!batchId) return
+    try {
+      await invokeRestoreStaged(batchId)
+      await Promise.all([
+        get().loadGauge(),
+        get().loadStaged(),
+        get().loadDuplicateGroups(),
+      ])
+      await get().loadCandidates()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to restore staged batch", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+      throw error
+    }
+  },
+
+  async emptyStageFiles(fileIds: number[], toTrash = false) {
+    if (!fileIds.length) return
+    try {
+      await invokeEmptyStaged(fileIds, toTrash)
+      await Promise.all([
+        get().loadGauge(),
+        get().loadStaged(),
+        get().loadDuplicateGroups(),
+      ])
+      await get().loadCandidates()
+    } catch (error) {
+      const message = extractErrorMessage(error)
+      console.error("Failed to empty staged files", error)
+      set((state) => ({
+        scan: {
+          ...state.scan,
+          errorMessages: [...state.scan.errorMessages, message],
+          lastError: message,
+        },
+      }))
+      throw error
+    }
+  },
+
   async undoLast() {
     try {
       await invokeCommand<BackendUndoResult>("undo_last")
@@ -629,6 +846,18 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     }
   },
 
+  handleScanQueued(payload) {
+    const roots = Math.max(0, payload?.roots ?? 0)
+    set((state) => ({
+      scan: {
+        ...state.scan,
+        status: state.scan.status === "running" ? state.scan.status : "queued",
+      },
+      queuedRoots: roots,
+    }))
+  },
+
+
   handleScanProgress(payload) {
     set((state) => ({
       scan: {
@@ -639,6 +868,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         errors: payload.errors,
         currentPath: payload.path_sample ?? null,
       },
+      queuedRoots: 0,
     }))
   },
 
@@ -655,10 +885,15 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         errorMessages: payload.error_messages,
         lastError: payload.error_messages.at(-1) ?? null,
       },
+      queuedRoots: 0,
     }))
 
     await get().loadFolders()
-    await get().loadGauge()
+    await Promise.all([
+      get().loadGauge(),
+      get().loadStaged(),
+      get().loadDuplicateGroups(),
+    ])
     const { selectedFolderId } = get()
     if (selectedFolderId) {
       await get().loadDir(selectedFolderId)
@@ -674,5 +909,85 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         lastError: payload.message,
       },
     }))
+  },
+
+  getStagedBuckets() {
+    const items = get().staged.items.filter((record) => record.status === "staged")
+    if (!items.length) {
+      return { cooling: [], ready: [] }
+    }
+
+    const grouped = new Map<string, StageRecord[]>()
+    for (const record of items) {
+      const key = record.batchId ?? `file-${record.recordId}`
+      const collection = grouped.get(key)
+      if (collection) {
+        collection.push(record)
+      } else {
+        grouped.set(key, [record])
+      }
+    }
+
+    const now = Date.now()
+    const cooling: StageBucket[] = []
+    const ready: StageBucket[] = []
+
+    for (const [key, records] of grouped) {
+      const fileIds = records
+        .map((record) => record.fileId)
+        .filter((id) => Number.isFinite(id) && id > 0)
+
+      const totalBytes = records.reduce((sum, record) => sum + (record.sizeBytes ?? 0), 0)
+
+      const stagedTimes = records
+        .map((record) => parseIsoDate(record.stagedAt))
+        .filter((value): value is number => value !== null)
+
+      const earliestStaged = stagedTimes.length ? new Date(Math.min(...stagedTimes)).toISOString() : null
+
+      const cooloffTimes = records
+        .map((record) => parseIsoDate(record.cooloffUntil))
+        .filter((value): value is number => value !== null)
+
+      const latestCooloff = cooloffTimes.length ? new Date(Math.max(...cooloffTimes)).toISOString() : null
+      const isCooling = latestCooloff !== null && parseIsoDate(latestCooloff)! > now
+
+      const bucket: StageBucket = {
+        key,
+        batchId: records[0]?.batchId ?? null,
+        records,
+        fileIds,
+        totalBytes,
+        stagedAt: earliestStaged,
+        readyAt: latestCooloff,
+      }
+
+      if (isCooling) {
+        cooling.push(bucket)
+      } else {
+        ready.push(bucket)
+      }
+    }
+
+    const byReadyTime = (a: StageBucket, b: StageBucket) => {
+      const aReady = parseIsoDate(a.readyAt)
+      const bReady = parseIsoDate(b.readyAt)
+      if (aReady === null && bReady === null) return 0
+      if (aReady === null) return -1
+      if (bReady === null) return 1
+      return aReady - bReady
+    }
+
+    cooling.sort(byReadyTime)
+    ready.sort((a, b) => {
+      const aStaged = parseIsoDate(a.stagedAt)
+      const bStaged = parseIsoDate(b.stagedAt)
+      if (aStaged === null && bStaged === null) return 0
+      if (aStaged === null) return 1
+      if (bStaged === null) return -1
+      return bStaged - aStaged
+    })
+
+    return { cooling, ready }
   },
 }))

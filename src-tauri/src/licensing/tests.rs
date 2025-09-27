@@ -429,7 +429,3 @@ mod tests {
         assert!(grace_remaining.num_days() >= 8);
     }
 }
-
-
-
-

@@ -22,7 +22,25 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main-window",
+          "windows": [
+            "*"
+          ],
+          "permissions": [
+            "core:default"
+          ],
+          "capabilities": [
+            "dialog-all",
+            "event-listen",
+            "fs",
+            "fs-watch",
+            "shell-open"
+          ]
+        }
+      ]
     },
     "withGlobalTauri": false
   },

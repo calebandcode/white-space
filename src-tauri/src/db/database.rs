@@ -1,8 +1,10 @@
-use crate::models::{Action, File, NewAction, NewFile, NewMetric, WatchedRoot, WeeklyTotals};
+use crate::models::{Action, File, NewAction, NewFile, NewMetric, NewStagedFile, StagedFileRecord, WatchedRoot, WeeklyTotals};
 use chrono::{DateTime, Utc};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, OptionalExtension, Result as SqliteResult, Row};
+use std::collections::HashSet;
+use std::path::Path;
 
 pub struct Database {
     conn: PooledConnection<SqliteConnectionManager>,
@@ -23,6 +25,12 @@ impl Database {
         let sha1: Option<String> = row.get("sha1").unwrap_or(None);
         let sha1 = sha1.filter(|s| !s.is_empty());
 
+        let is_deleted = row.get::<_, i64>("is_deleted").unwrap_or(0) != 0;
+        let is_staged = row.get::<_, i64>("is_staged").unwrap_or(0) != 0;
+        let cooloff_until = row
+            .get::<_, Option<DateTime<Utc>>>("cooloff_until")
+            .unwrap_or(None);
+
         Ok(File {
             id: row.get("id")?,
             path: row.get("path")?,
@@ -37,10 +45,21 @@ impl Database {
             sha1,
             first_seen_at: row.get("first_seen_at")?,
             last_seen_at: row.get("last_seen_at")?,
-            is_deleted: row
-                .get::<_, i64>("is_deleted")
-                .map(|v| v != 0)
-                .unwrap_or(false),
+            is_deleted,
+            is_staged,
+            cooloff_until,
+        })
+    }
+
+    fn map_row_to_staged(row: &Row<'_>) -> SqliteResult<StagedFileRecord> {
+        Ok(StagedFileRecord {
+            id: row.get("id")?,
+            file_id: row.get("file_id")?,
+            staged_at: row.get("staged_at")?,
+            expires_at: row.get("expires_at").unwrap_or(None),
+            batch_id: row.get("batch_id").unwrap_or(None),
+            status: row.get("status")?,
+            note: row.get("note").unwrap_or(None),
         })
     }
 
@@ -117,6 +136,18 @@ impl Database {
         self.ensure_column("files", "last_opened_at", "TEXT")?;
         self.ensure_column("files", "partial_sha1", "TEXT")?;
         self.ensure_column("files", "sha1", "TEXT")?;
+        self.ensure_column("files", "is_staged", "INTEGER NOT NULL DEFAULT 0")?;
+        self.ensure_column("files", "cooloff_until", "TEXT")?;
+        self.ensure_column("actions", "origin", "TEXT")?;
+        self.ensure_column("actions", "note", "TEXT")?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS staged_files (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                file_id INTEGER NOT NULL,\n                staged_at TEXT NOT NULL,\n                expires_at TEXT,\n                batch_id TEXT,\n                status TEXT NOT NULL DEFAULT 'pending',\n                note TEXT,\n                FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE\n            )",
+            [],
+        )?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_files_status ON staged_files(status)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_files_expires_at ON staged_files(expires_at)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_files_file_id ON staged_files(file_id)", [])?;
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_parent_dir ON files(parent_dir)",
@@ -272,33 +303,19 @@ impl Database {
 
     pub fn insert_action(&self, action: &NewAction) -> SqliteResult<i64> {
         let now = Utc::now();
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO actions (file_id, action, batch_id, src_path, dst_path, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        self.conn.execute(
+            "INSERT INTO actions (file_id, action, batch_id, src_path, dst_path, origin, note, created_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                action.file_id,
+                action.action.to_string(),
+                action.batch_id.as_deref().unwrap_or(""),
+                action.src_path.as_deref().unwrap_or(""),
+                action.dst_path.as_deref().unwrap_or(""),
+                action.origin.as_deref().unwrap_or(""),
+                action.note.as_deref().unwrap_or(""),
+                &now.to_rfc3339(),
+            ],
         )?;
-        stmt.execute([
-            &action.file_id.to_string(),
-            &action.action.to_string(),
-            &action
-                .batch_id
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            &action
-                .src_path
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            &action
-                .dst_path
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            &now.to_rfc3339(),
-        ])?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -307,20 +324,24 @@ impl Database {
             .conn
             .prepare("SELECT * FROM actions WHERE file_id = ?1 ORDER BY created_at DESC LIMIT 1")?;
         let mut rows = stmt.query_map([file_id], |row| {
+            let action_str: String = row.get("action")?;
+            let action = action_str.parse().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    0,
+                    "ActionType".to_string(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
             Ok(Action {
-                id: row.get(0)?,
-                file_id: row.get(1)?,
-                action: row.get::<_, String>(2)?.parse().map_err(|_| {
-                    rusqlite::Error::InvalidColumnType(
-                        2,
-                        "ActionType".to_string(),
-                        rusqlite::types::Type::Text,
-                    )
-                })?,
-                batch_id: row.get(3)?,
-                src_path: row.get(4)?,
-                dst_path: row.get(5)?,
-                created_at: row.get(6)?,
+                id: row.get("id")?,
+                file_id: row.get("file_id")?,
+                action,
+                batch_id: row.get("batch_id")?,
+                src_path: row.get("src_path")?,
+                dst_path: row.get("dst_path")?,
+                origin: row.get("origin")?,
+                note: row.get("note")?,
+                created_at: row.get("created_at")?,
             })
         })?;
         if let Some(row) = rows.next() {
@@ -488,17 +509,23 @@ impl Database {
     // Action-related queries
     pub fn get_actions_by_batch_id(&self, batch_id: &str) -> SqliteResult<Vec<Action>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, file_id, action, batch_id, src_path, dst_path, created_at FROM actions WHERE batch_id = ?1 ORDER BY created_at ASC"
+            "SELECT id, file_id, action, batch_id, src_path, dst_path, origin, note, created_at FROM actions WHERE batch_id = ?1 ORDER BY created_at ASC"
         )?;
         let rows = stmt.query_map([batch_id], |row| {
+            let action = row
+                .get::<_, String>(2)?
+                .parse()
+                .unwrap_or(crate::models::ActionType::Archive);
             Ok(Action {
                 id: Some(row.get(0)?),
                 file_id: row.get(1)?,
-                action: row.get::<_, String>(2)?.parse().unwrap_or(crate::models::ActionType::Archive),
+                action,
                 batch_id: row.get(3)?,
                 src_path: row.get(4)?,
                 dst_path: row.get(5)?,
-                created_at: row.get(6)?,
+                origin: row.get(6)?,
+                note: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })?;
         let mut actions = Vec::new();
@@ -548,17 +575,23 @@ impl Database {
 
     pub fn get_files_deleted_in_period(&self, start_date: &str, end_date: &str) -> SqliteResult<Vec<Action>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, file_id, action, batch_id, src_path, dst_path, created_at FROM actions WHERE action = 'delete' AND created_at BETWEEN ?1 AND ?2"
+            "SELECT id, file_id, action, batch_id, src_path, dst_path, origin, note, created_at FROM actions WHERE action = 'delete' AND created_at BETWEEN ?1 AND ?2"
         )?;
         let rows = stmt.query_map([start_date, end_date], |row| {
+            let action = row
+                .get::<_, String>(2)?
+                .parse()
+                .unwrap_or(crate::models::ActionType::Delete);
             Ok(Action {
                 id: Some(row.get(0)?),
                 file_id: row.get(1)?,
-                action: row.get::<_, String>(2)?.parse().unwrap_or(crate::models::ActionType::Delete),
+                action,
                 batch_id: row.get(3)?,
                 src_path: row.get(4)?,
                 dst_path: row.get(5)?,
-                created_at: row.get(6)?,
+                origin: row.get(6)?,
+                note: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })?;
         let mut actions = Vec::new();
@@ -566,6 +599,150 @@ impl Database {
             actions.push(row?);
         }
         Ok(actions)
+    }
+
+    pub fn stage_files(&self, entries: &[NewStagedFile]) -> SqliteResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert_stmt = self.conn.prepare(
+            "INSERT INTO staged_files (file_id, staged_at, expires_at, batch_id, status, note)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n             ON CONFLICT(file_id) DO UPDATE SET\n                staged_at = excluded.staged_at,\n                expires_at = excluded.expires_at,\n                batch_id = excluded.batch_id,\n                status = excluded.status,\n                note = excluded.note"
+        )?;
+        let mut update_stmt = self.conn.prepare("UPDATE files SET is_staged = 1, cooloff_until = ?2 WHERE id = ?1")?;
+
+        for entry in entries {
+            let staged_at = entry.staged_at.to_rfc3339();
+            let expires_at = entry.expires_at.map(|dt| dt.to_rfc3339());
+            insert_stmt.execute(params![
+                entry.file_id,
+                &staged_at,
+                expires_at.as_deref(),
+                entry.batch_id.as_deref().unwrap_or(""),
+                entry.status.as_str(),
+                entry.note.as_deref().unwrap_or(""),
+            ])?;
+            update_stmt.execute(params![entry.file_id, expires_at.as_deref()])?;
+        }
+
+        Ok(())
+    }
+
+    pub fn update_staged_status(&self, file_ids: &[i64], status: &str) -> SqliteResult<()> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self.conn.prepare("UPDATE staged_files SET status = ?1 WHERE file_id = ?2")?;
+        for file_id in file_ids {
+            stmt.execute(params![status, file_id])?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_files_unstaged(&self, file_ids: &[i64]) -> SqliteResult<()> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let mut reset_stmt = self.conn.prepare("UPDATE files SET is_staged = 0, cooloff_until = NULL WHERE id = ?1")?;
+        let mut delete_stmt = self.conn.prepare("DELETE FROM staged_files WHERE file_id = ?1")?;
+        for file_id in file_ids {
+            reset_stmt.execute(params![file_id])?;
+            delete_stmt.execute(params![file_id])?;
+        }
+        Ok(())
+    }
+
+    pub fn list_staged_with_files(&self, statuses: Option<&[String]>) -> SqliteResult<Vec<(StagedFileRecord, File)>> {
+        let filters = statuses.map(|items| items.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>());
+        let mut stmt = self.conn.prepare("SELECT id, file_id, staged_at, expires_at, batch_id, status, note FROM staged_files")?;
+        let rows = stmt.query_map([], |row| Self::map_row_to_staged(row))?;
+        let mut results = Vec::new();
+        for row in rows {
+            let record = row?;
+            if let Some(filter) = &filters {
+                let status = record.status.to_lowercase();
+                if !filter.iter().any(|s| s == &status) {
+                    continue;
+                }
+            }
+            if let Some(file) = self.get_file_by_id(record.file_id)? {
+                results.push((record, file));
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn update_file_location(&self, file_id: i64, new_path: &str) -> SqliteResult<()> {
+        let parent = Path::new(new_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| new_path.to_string());
+        self.conn.execute("UPDATE files SET path = ?1, parent_dir = ?2 WHERE id = ?3", params![new_path, parent, file_id])?;
+        Ok(())
+    }
+
+    pub fn duplicate_groups(&self, limit: Option<usize>) -> SqliteResult<Vec<(String, Vec<File>)>> {
+        let base_sql = "SELECT sha1 FROM files WHERE sha1 IS NOT NULL AND sha1 != '' AND is_deleted = 0 GROUP BY sha1 HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC";
+        let hashes = if let Some(limit) = limit {
+            let mut stmt = self.conn.prepare(&format!("{base_sql} LIMIT ?"))?;
+            let rows = stmt.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+            let mut collected = Vec::new();
+            for row in rows {
+                collected.push(row?);
+            }
+            collected
+        } else {
+            let mut stmt = self.conn.prepare(base_sql)?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut collected = Vec::new();
+            for row in rows {
+                collected.push(row?);
+            }
+            collected
+        };
+
+        let mut results = Vec::with_capacity(hashes.len());
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM files WHERE sha1 = ?1 AND sha1 IS NOT NULL AND sha1 != '' AND is_deleted = 0 ORDER BY size_bytes DESC")?;
+        for hash in hashes {
+            let rows = stmt.query_map([hash.as_str()], |row| Self::map_row_to_file(row))?;
+            let mut files = Vec::new();
+            for row in rows {
+                files.push(row?);
+            }
+            results.push((hash, files));
+        }
+
+        Ok(results)
+    }
+
+    pub fn mark_missing_for_root(&self, root: &str, seen_paths: &HashSet<String>) -> SqliteResult<()> {
+        let pattern = Self::root_like_pattern(root);
+        let mut stmt = self.conn.prepare("SELECT id, path FROM files WHERE path LIKE ?1 AND is_deleted = 0")?;
+        let rows = stmt.query_map([pattern], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+        let mut missing = Vec::new();
+        for row in rows {
+            let (file_id, path) = row?;
+            if !seen_paths.contains(&path) {
+                missing.push(file_id);
+            }
+        }
+        for id in missing {
+            self.conn.execute("UPDATE files SET is_deleted = 1, is_staged = 0, cooloff_until = NULL WHERE id = ?1", params![id])?;
+            self.conn.execute("DELETE FROM staged_files WHERE file_id = ?1", params![id])?;
+        }
+        Ok(())
+    }
+
+    fn root_like_pattern(root: &str) -> String {
+        if root.ends_with('/') || root.ends_with('\\') {
+            format!("{root}%")
+        } else if root.contains('\\') {
+            format!("{root}\\%")
+        } else {
+            format!("{root}/%")
+        }
     }
 
     pub fn get_total_file_size(&self) -> SqliteResult<i64> {

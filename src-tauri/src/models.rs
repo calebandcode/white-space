@@ -17,6 +17,8 @@ pub struct File {
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub is_deleted: bool,
+    pub is_staged: bool,
+    pub cooloff_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,8 @@ pub struct Action {
     pub batch_id: Option<String>,
     pub src_path: Option<String>,
     pub dst_path: Option<String>,
+    pub origin: Option<String>,
+    pub note: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -119,6 +123,8 @@ pub struct NewAction {
     pub batch_id: Option<String>,
     pub src_path: Option<String>,
     pub dst_path: Option<String>,
+    pub origin: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,4 +139,25 @@ pub struct WatchedRoot {
     pub id: i64,
     pub path: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedFileRecord {
+    pub id: i64,
+    pub file_id: i64,
+    pub staged_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub batch_id: Option<String>,
+    pub status: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewStagedFile {
+    pub file_id: i64,
+    pub staged_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub batch_id: Option<String>,
+    pub status: String,
+    pub note: Option<String>,
 }
