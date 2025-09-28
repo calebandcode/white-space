@@ -157,14 +157,18 @@ impl ArchiveManager {
 
     fn check_permissions(&self, path: &Path) -> OpsResult<()> {
         // Check if we can write to the directory
-        if path.exists() {
-            let metadata = fs::metadata(path).map_err(|e| {
-                OpsError::ArchiveError(format!("Failed to read directory metadata: {}", e))
+        if !path.exists() {
+            fs::create_dir_all(path).map_err(|e| {
+                OpsError::ArchiveError(format!("Failed to create archive directory: {}", e))
             })?;
+        }
 
-            if !metadata.permissions().readonly() {
-                return Ok(());
-            }
+        let metadata = fs::metadata(path).map_err(|e| {
+            OpsError::ArchiveError(format!("Failed to read directory metadata: {}", e))
+        })?;
+
+        if !metadata.permissions().readonly() {
+            return Ok(());
         }
 
         // Try to create a test file
