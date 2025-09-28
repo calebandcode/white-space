@@ -2,12 +2,11 @@
 
 import * as React from "react"
 import {
-  Bell,
   HelpCircle,
   Home,
   Loader2,
   PlayCircle,
-  RefreshCcw,
+  Archive,
   Search,
   Settings,
 } from "lucide-react"
@@ -26,17 +25,18 @@ import {
   SidebarProvider,
 } from "@/components/ui/sidebar"
 import { useFolderStore } from "@/store/folder-store"
+import { Link, useLocation } from "react-router-dom"
 
 const data = {
   nav: [
-    { name: "Home", icon: Home },
-    { name: "Notifications", icon: Bell },
-    { name: "Sync Activity", icon: RefreshCcw },
+    { name: "Home", icon: Home, path: "/" },
+    { name: "Archive", icon: Archive, path: "/archive" },
   ],
 }
 
 function ApplicationModal({ children }: React.PropsWithChildren) {
   const [open, setOpen] = React.useState(true)
+  const location = useLocation()
   const startScan = useFolderStore((state) => state.startScan)
   const scanStatus = useFolderStore((state) => state.scan.status)
   const isScanning = scanStatus === "running" || scanStatus === "queued"
@@ -58,16 +58,19 @@ function ApplicationModal({ children }: React.PropsWithChildren) {
               <SidebarGroup>
                 <SidebarGroupContent className="gap-4">
                   <SidebarMenu className="mt-10">
-                    {data.nav.map((item) => (
-                      <SidebarMenuItem key={item.name}>
-                        <SidebarMenuButton asChild isActive={item.name === "Home"}>
-                          <a href="#">
-                            <item.icon />
-                            <span>{item.name}</span>
-                          </a>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    ))}
+                    {data.nav.map((item) => {
+                      const isActive = item.path ? location.pathname === item.path : false
+                      return (
+                        <SidebarMenuItem key={item.name}>
+                          <SidebarMenuButton asChild isActive={isActive}>
+                            <Link to={item.path}>
+                              <item.icon />
+                              <span>{item.name}</span>
+                            </Link>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      )
+                    })}
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
