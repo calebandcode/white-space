@@ -1,5 +1,3 @@
-# 🧭 0) High-level goal (paste this first in Codex)
-
 ```
 Goal: Connect UI to backend.
 
@@ -26,8 +24,6 @@ Constraints:
 ---
 
 # 🗃️ 1) DB migration for `watched_roots`
-
-**Prompt to Codex**
 
 ```
 Add a SQLite migration for table watched_roots.
@@ -92,8 +88,6 @@ impl Db {
 ---
 
 # ➕ 3) Commands: add_folder / list_folders
-
-**Prompt**
 
 ```
 Implement Tauri commands:
@@ -200,8 +194,6 @@ pub async fn list_folders(db: State<'_, Db>) -> Result<Vec<WatchedFolder>, Strin
 
 # 🗂️ 4) Command: list_dir (non-recursive folder browser)
 
-**Prompt**
-
 ```
 Add command list_dir(root_path: String) -> Result<Vec<DirEntry>, String>.
 
@@ -271,8 +263,6 @@ pub async fn list_dir(root_path: String) -> Result<Vec<DirEntry>, String> {
 
 # 🔗 5) Command: open_in_system (Explorer / Finder / File Manager)
 
-**Prompt**
-
 ```
 Add cross-platform open_in_system(path: String, reveal: bool) -> Result<(), String>.
 
@@ -333,8 +323,6 @@ pub async fn open_in_system(path: String, reveal: bool) -> Result<(), String> {
 ---
 
 # 🖥️ 6) Frontend wiring (React)
-
-**Prompt**
 
 ```
 Add a WatchedFolders store + folder content panel.
@@ -439,8 +427,6 @@ export const useFolders = create<FolderState>((set, get) => ({
 
 # 🛡️ 8) Guardrails & polish
 
-**Prompt**
-
 ```
 - In add_folder: reject system roots like C:\ or / (return clear error).
 - In list_dir: wrap read_dir in error mapping; if permission denied, return error string “Permission denied” to UI.
@@ -490,7 +476,7 @@ export const useFolders = create<FolderState>((set, get) => ({
 
 ---
 
-# 🧱 10) Known pitfalls (so Codex avoids them)
+# 🧱 10) Known pitfalls
 
 - **Windows long paths**: avoid building your own `\\?\` logic for now; just surface a friendly error if path is too long.
 - **Explorer `/select,` comma**: keep comma after `/select,` exactly.
@@ -499,7 +485,7 @@ export const useFolders = create<FolderState>((set, get) => ({
 
 ---
 
-## What to build next (after this batch)
+## Next
 
 - “Scan this folder” button on each watched folder.
 - Progress chip in the sidebar (reads `scan_status`).
