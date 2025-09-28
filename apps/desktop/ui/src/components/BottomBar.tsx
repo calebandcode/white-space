@@ -52,7 +52,7 @@ export default function BottomBar({
             {scanSummary ? <span className="ml-2 text-primary/70">{scanSummary}</span> : null}
             {currentPathDisplay ? (
               <p className="truncate text-[11px] text-primary/60" title={currentPathDisplay}>
-                {currentPathDisplay}
+                {currentPathDisplay.slice(0, 40) + "..."}
               </p>
             ) : null}
           </div>
