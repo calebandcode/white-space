@@ -601,6 +601,24 @@ impl Database {
         Ok(actions)
     }
 
+    // Staged-in-window queries (current staged state only)
+    pub fn list_current_staged_files_in_period(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> SqliteResult<Vec<File>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.path, f.parent_dir, f.mime, f.size_bytes, f.created_at, f.modified_at, f.accessed_at, f.last_opened_at, f.partial_sha1, f.sha1, f.first_seen_at, f.last_seen_at, f.is_deleted \
+             FROM staged_files s \
+             JOIN files f ON f.id = s.file_id \
+             WHERE s.status = 'staged' AND s.staged_at BETWEEN ?1 AND ?2"
+        )?;
+        let rows = stmt.query_map([start_date, end_date], Self::map_row_to_file)?;
+        let mut files = Vec::new();
+        for row in rows { files.push(row?); }
+        Ok(files)
+    }
+
     pub fn stage_files(&self, entries: &[NewStagedFile]) -> SqliteResult<()> {
         if entries.is_empty() {
             return Ok(());

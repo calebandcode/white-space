@@ -11,6 +11,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::State;
+use tauri::Emitter;
 use walkdir::WalkDir;
 
 // Command result types
@@ -620,7 +621,7 @@ fn list_directory_entries(dir: &Path) -> Result<Vec<DirectoryEntry>, CommandErro
 // Tauri Commands
 
 #[tauri::command]
-pub async fn add_folder(path: String, db: State<'_, DbPool>) -> Result<WatchedFolder, String> {
+pub async fn add_folder(path: String, app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<WatchedFolder, String> {
     let validated = validate_path(&path).map_err(|e| format!("ERR_VALIDATION: {}", e))?;
     let normalized = normalize_directory_path(&validated).map_err(command_error_to_string)?;
 
@@ -650,6 +651,8 @@ pub async fn add_folder(path: String, db: State<'_, DbPool>) -> Result<WatchedFo
     if let Err(err) = register_root(folder.path.as_str()) {
         eprintln!("Failed to register watcher for {}: {}", folder.path, err);
     }
+    // Notify UI roots changed
+    let _ = app.emit("roots://changed", serde_json::json!({ "count": 1 }));
     Ok(folder)
 }
 
@@ -689,7 +692,7 @@ pub async fn list_folders(db: State<'_, DbPool>) -> Result<Vec<WatchedFolder>, S
 }
 
 #[tauri::command]
-pub async fn remove_folder(id: i64, db: State<'_, DbPool>) -> Result<(), String> {
+pub async fn remove_folder(id: i64, app: tauri::AppHandle, db: State<'_, DbPool>) -> Result<(), String> {
     if id <= 0 {
         return Err("ERR_VALIDATION: Invalid folder id".to_string());
     }
@@ -719,6 +722,8 @@ pub async fn remove_folder(id: i64, db: State<'_, DbPool>) -> Result<(), String>
         eprintln!("Failed to unregister watcher for {}: {}", removed_path, err);
     }
 
+    // Notify UI roots changed
+    let _ = app.emit("roots://changed", serde_json::json!({ "count": 1 }));
     Ok(())
 }
 

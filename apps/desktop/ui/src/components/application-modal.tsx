@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 
 import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Toaster } from "@/components/ui/toaster"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -130,6 +131,7 @@ function ApplicationModal({ children }: React.PropsWithChildren) {
               )}
             </div>
           </main>
+          <Toaster />
         </SidebarProvider>
       </DialogContent>
     </Dialog>

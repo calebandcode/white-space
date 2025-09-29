@@ -115,14 +115,13 @@ impl GaugeManager {
     }
 
     fn compute_potential_today(&self, db: &Database) -> OpsResult<u64> {
-        // Get current daily candidates
-        let candidates = self.selector.daily_candidates(Some(1000), db)?; // Large limit to get all
-
+        let candidates = self.selector.daily_candidates(Some(1000), db)?;
+        let roots = db.list_watched_paths().map_err(|e| OpsError::GaugeError(format!("Failed to list roots: {}", e)))?;
         let total_bytes: u64 = candidates
-            .iter()
-            .map(|candidate| candidate.size_bytes as u64)
+            .into_iter()
+            .filter(|c| Self::path_in_any_root(&c.path, &roots))
+            .map(|c| c.size_bytes as u64)
             .sum();
-
         Ok(total_bytes)
     }
 
@@ -132,17 +131,16 @@ impl GaugeManager {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> OpsResult<u64> {
-        // Get all files that were archived in the window
-        let archived_files = self.get_archived_files_in_window(db, window_start, window_end)?;
-
-        let mut staged_bytes = 0u64;
-
-        for file in archived_files {
-            // Check if this file has been deleted after being archived
-            if !self.has_delete_action_after_archive(db, &file, window_start, window_end)? {
-                staged_bytes += file.size_bytes as u64;
-            }
-        }
+        // Compute staged by summing current staged records within the window (and under active roots)
+        let roots = db.list_watched_paths().map_err(|e| OpsError::GaugeError(format!("Failed to list roots: {}", e)))?;
+        let staged_files = db
+            .list_current_staged_files_in_period(&window_start.to_rfc3339(), &window_end.to_rfc3339())
+            .map_err(|e| OpsError::GaugeError(format!("Failed to list staged files: {}", e)))?;
+        let staged_bytes = staged_files
+            .into_iter()
+            .filter(|f| Self::path_in_any_root(&f.path, &roots))
+            .map(|f| f.size_bytes as u64)
+            .sum();
 
         Ok(staged_bytes)
     }
@@ -155,13 +153,16 @@ impl GaugeManager {
     ) -> OpsResult<u64> {
         // Get all delete actions in the window
         let delete_actions = self.get_delete_actions_in_window(db, window_start, window_end)?;
+        let roots = db.list_watched_paths().map_err(|e| OpsError::GaugeError(format!("Failed to list roots: {}", e)))?;
 
         let mut freed_bytes = 0u64;
 
         for action in delete_actions {
             // Get the file size from the action's file_id
             if let Some(file) = self.get_file_by_id(db, action.file_id)? {
-                freed_bytes += file.size_bytes as u64;
+                if Self::path_in_any_root(&file.path, &roots) {
+                    freed_bytes += file.size_bytes as u64;
+                }
             }
         }
 
@@ -284,6 +285,17 @@ impl GaugeManager {
             self.format_bytes(state.staged_week_bytes),
             self.format_bytes(state.freed_week_bytes)
         )
+    }
+
+    fn path_in_any_root(path: &str, roots: &[String]) -> bool {
+        let p = std::path::Path::new(path);
+        for root in roots {
+            let r = std::path::Path::new(root);
+            if p.starts_with(r) {
+                return true;
+            }
+        }
+        false
     }
 
     fn format_bytes(&self, bytes: u64) -> String {
