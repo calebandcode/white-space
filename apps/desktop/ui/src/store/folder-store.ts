@@ -15,6 +15,7 @@ import {
 import type { DirectoryEntry, ScanCandidate, WatchedFolder } from "@/types/folders"
 
 import { notifySweepReady } from "@/lib/notify"
+import { toast } from "@/components/ui/use-toast"
 
 const SOFT_SWEEP_THRESHOLD = 3 * 1024 ** 3
 const HARD_SWEEP_THRESHOLD = 4 * 1024 ** 3
@@ -366,6 +367,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to load folders", error)
+      toast({ title: "Failed to load folders", description: message })
       set({
         isLoadingFolders: false,
         folderError: message,
@@ -424,6 +426,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to add folder", error)
+      toast({ title: "Add folder failed", description: message })
       set({ folderError: message })
     }
   },
@@ -437,6 +440,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to remove folder", error)
+      toast({ title: "Remove folder failed", description: message })
       set({ folderError: message })
     }
   },
@@ -472,6 +476,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to load directory entries", error)
+      toast({ title: "Failed to load directory", description: message })
       set({
         isLoadingEntries: false,
         entryError: message,
@@ -487,6 +492,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to open in system", error)
+      toast({ title: "Open failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -499,11 +505,16 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async startScan(paths) {
     try {
+      if ((!paths || paths.length === 0) && get().folders.length === 0) {
+        toast({ title: "Scan failed", description: "ERR_VALIDATION: No scan roots configured" })
+        return
+      }
       await invokeCommand("start_scan", { paths: paths ?? null })
       await get().refreshScanStatus()
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to start scan", error)
+      toast({ title: "Scan failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -516,11 +527,16 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async rescanAll() {
     try {
+      if (get().folders.length === 0) {
+        toast({ title: "Rescan all failed", description: "ERR_VALIDATION: No scan roots configured" })
+        return
+      }
       await invokeCommand("rescan_all", {})
       await get().refreshScanStatus()
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to rescan all", error)
+      toast({ title: "Rescan all failed", description: message })
       set((state) => ({
         scan: { ...state.scan, errorMessages: [...state.scan.errorMessages, message], lastError: message },
       }))
@@ -535,6 +551,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to rescan folder", error)
+      toast({ title: "Rescan folder failed", description: message })
       set((state) => ({
         scan: { ...state.scan, errorMessages: [...state.scan.errorMessages, message], lastError: message },
       }))
@@ -565,6 +582,10 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         queuedRoots: nextQueuedRoots,
       }))
 
+      if (payload.last_error && payload.last_error !== prevScan.lastError) {
+        toast({ title: "Scan error", description: payload.last_error })
+      }
+
       if (nowIdle) {
         const selectedFolderId = get().selectedFolderId
         await get().loadFolders()
@@ -580,6 +601,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
       }
     } catch (error) {
       console.error("Failed to refresh scan status", error)
+      toast({ title: "Scan status error", description: extractErrorMessage(error) })
     }
   },
 
@@ -625,6 +647,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
       set({ candidates: flattened.map(mapCandidate), selectedCandidateIds: [] })
     } catch (error) {
       console.error("Failed to load candidates", error)
+      toast({ title: "Failed to load candidates", description: extractErrorMessage(error) })
     }
   },
 
@@ -640,6 +663,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to load staged entries", error)
+      toast({ title: "Failed to load staged", description: message })
       set((state) => ({
         staged: { ...state.staged, loading: false, error: message },
       }))
@@ -658,6 +682,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to load duplicate groups", error)
+      toast({ title: "Failed to load duplicates", description: message })
       set((state) => ({
         duplicates: { ...state.duplicates, loading: false, error: message },
       }))
@@ -704,6 +729,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to stage files", error)
+      toast({ title: "Stage failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -727,6 +753,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to archive files", error)
+      toast({ title: "Archive failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -748,6 +775,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to delete files", error)
+      toast({ title: "Delete failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -771,6 +799,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to restore staged batch", error)
+      toast({ title: "Restore failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -795,6 +824,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to empty staged files", error)
+      toast({ title: "Empty staged failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -813,6 +843,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
       await get().loadCandidates()
     } catch (error) {
       console.error("Failed to undo last batch", error)
+      toast({ title: "Undo failed", description: extractErrorMessage(error) })
     }
   },
 
@@ -822,6 +853,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
       return result
     } catch (error) {
       console.error("Failed to list undoable batches", error)
+      toast({ title: "Load undoable batches failed", description: extractErrorMessage(error) })
       return []
     }
   },
@@ -835,6 +867,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
     } catch (error) {
       const message = extractErrorMessage(error)
       console.error("Failed to undo batch", error)
+      toast({ title: "Undo batch failed", description: message })
       set((state) => ({
         scan: {
           ...state.scan,
@@ -909,6 +942,7 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
         lastError: payload.message,
       },
     }))
+    toast({ title: "Scan error", description: payload.message })
   },
 
   getStagedBuckets() {

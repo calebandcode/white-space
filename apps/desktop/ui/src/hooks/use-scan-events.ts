@@ -74,6 +74,22 @@ export function useScanEvents() {
         } else {
           unsubs.push(offQueued)
         }
+
+        // Roots changed -> refresh folders, gauge, candidates
+        const offRoots = await listen<{ count: number }>("roots://changed", async () => {
+          try {
+            await useFolderStore.getState().loadFolders()
+            await useFolderStore.getState().loadGauge()
+            await useFolderStore.getState().loadCandidates()
+          } catch (e) {
+            // ignore
+          }
+        })
+        if (isCancelled) {
+          offRoots()
+        } else {
+          unsubs.push(offRoots)
+        }
       } catch (error) {
         console.error("Failed to register scan event listeners", error)
       }
