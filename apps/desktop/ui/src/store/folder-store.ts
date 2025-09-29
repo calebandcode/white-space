@@ -505,6 +505,10 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async startScan(paths) {
     try {
+      const status = get().scan.status
+      if (status === "running" || status === "queued") {
+        return
+      }
       if ((!paths || paths.length === 0) && get().folders.length === 0) {
         toast({ title: "Scan failed", description: "ERR_VALIDATION: No scan roots configured" })
         return
@@ -527,6 +531,10 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
 
   async rescanAll() {
     try {
+      const status = get().scan.status
+      if (status === "running" || status === "queued") {
+        return
+      }
       if (get().folders.length === 0) {
         toast({ title: "Rescan all failed", description: "ERR_VALIDATION: No scan roots configured" })
         return
@@ -546,6 +554,10 @@ export const useFolderStore = create<FolderStoreState>((set, get) => ({
   async rescanFolder(path) {
     if (!path) return
     try {
+      const status = get().scan.status
+      if (status === "running" || status === "queued") {
+        return
+      }
       await invokeCommand("rescan_folder", { path })
       await get().refreshScanStatus()
     } catch (error) {
