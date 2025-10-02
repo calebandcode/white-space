@@ -70,7 +70,7 @@ white-space/
 To run the development environment:
 
 ```bash
-npm run tauri:dev
+cargo tauri dev
 ```
 
 This command will:
