@@ -1,13 +1,9 @@
-Here’s an updated version of your `README.md` with the requested improvements, including how to add images and an updated project status.
-
----
-
-# ![White Space Logo](https://github.com/calebandcode/white-space/blob/main/assets/empty-space.png) White Space
+# White Space
 
 White Space is an AI-powered, local-first file decluttering desktop application built with **Rust** (Tauri 2), **React**, **Vite**, and **TypeScript**. It helps users organize their desktop by detecting duplicate files, managing oversized or outdated files, and making suggestions for tidying up.
 
 ```markdown
-![Demo](https://github.com/calebandcode/white-space/blob/main/assets/white-space.png)
+
 ```
 
 ## Features
