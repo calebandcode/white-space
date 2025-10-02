@@ -2,10 +2,6 @@
 
 White Space is an AI-powered, local-first file decluttering desktop application built with **Rust** (Tauri 2), **React**, **Vite**, and **TypeScript**. It helps users organize their desktop by detecting duplicate files, managing oversized or outdated files, and making suggestions for tidying up.
 
-```markdown
-
-```
-
 ## Features
 
 - **Tauri 2**: A modern desktop app framework for building cross-platform apps with web technologies.
@@ -138,5 +134,3 @@ Here are some visuals of the application in action:
 - `npm run build` - Build the frontend
 - `cargo tauri dev` - Start Tauri development server (front-end + back-end)
 - `cargo tauri build` - Build Tauri application
-
----
